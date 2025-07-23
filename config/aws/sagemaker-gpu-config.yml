@@ -1,0 +1,108 @@
+# SageMaker GPU Configuration for Call Analytics
+# Handles 10TB VERINT_TEXT_ANALYSIS processing
+
+sagemaker:
+  endpoints:
+    # Primary embedding endpoint for Hebrew/Arabic text
+    embedding-gpu-primary:
+      instance_type: ml.g4dn.2xlarge      # 1 GPU, 8 vCPUs, 32GB RAM
+      initial_instance_count: 3
+      max_instance_count: 10
+      target_utilization: 70
+      model:
+        name: multilingual-embedding-v1
+        framework: pytorch
+        framework_version: "1.13"
+        python_version: py39
+        
+    # High-performance endpoint for batch processing
+    embedding-gpu-batch:
+      instance_type: ml.g5.4xlarge        # 1 A10G GPU, 16 vCPUs, 64GB RAM  
+      initial_instance_count: 2
+      max_instance_count: 8
+      target_utilization: 80
+      model:
+        name: batch-embedding-v1
+        framework: pytorch
+        framework_version: "1.13"
+        
+    # LLM endpoint for Hebrew text analysis
+    llm-gpu-hebrew:
+      instance_type: ml.g5.12xlarge       # 4 A10G GPUs, 48 vCPUs, 192GB RAM
+      initial_instance_count: 1
+      max_instance_count: 5
+      target_utilization: 75
+      model:
+        name: hebrew-llm-analysis-v1
+        framework: transformers
+        
+  auto_scaling:
+    scale_up_cooldown: 300      # 5 minutes
+    scale_down_cooldown: 600    # 10 minutes
+    target_tracking:
+      metric: CPUUtilization
+      target_value: 70
+      
+  monitoring:
+    cloudwatch_logs: true
+    model_latency_alarms: true
+    cost_alerts: true
+    
+# ECS GPU Cluster for distributed processing  
+ecs_gpu_cluster:
+  cluster_name: call-analytics-gpu
+  capacity_providers:
+    - name: gpu-capacity-provider
+      auto_scaling_group:
+        min_size: 2
+        max_size: 20
+        desired_capacity: 5
+        instance_types:
+          - g4dn.xlarge     # 1 GPU, 4 vCPUs, 16GB
+          - g4dn.2xlarge    # 1 GPU, 8 vCPUs, 32GB
+          - g5.xlarge       # 1 A10G GPU, 4 vCPUs, 16GB
+        ami_id: ami-0c9b35c9a8d3d8ad1  # ECS GPU-optimized AMI
+        
+  services:
+    ml-processing:
+      task_definition: call-analytics-ml-gpu
+      desired_count: 5
+      deployment_configuration:
+        maximum_percent: 200
+        minimum_healthy_percent: 50
+      auto_scaling:
+        min_capacity: 2
+        max_capacity: 15
+        target_tracking:
+          metric: ECSServiceAverageCPUUtilization
+          target_value: 60
+
+# Batch processing for 10TB data
+batch_processing:
+  job_queue: call-analytics-gpu-queue
+  compute_environment:
+    type: MANAGED
+    state: ENABLED
+    compute_resources:
+      type: EC2
+      instance_types:
+        - g4dn.4xlarge    # 1 GPU, 16 vCPUs, 64GB
+        - g5.8xlarge      # 1 A10G GPU, 32 vCPUs, 128GB
+      min_vcpus: 0
+      max_vcpus: 1000
+      desired_vcpus: 50
+      
+  job_definitions:
+    embedding_batch:
+      job_queue: call-analytics-gpu-queue
+      memory: 32768
+      vcpus: 8
+      gpu_count: 1
+      timeout: 3600
+      
+    llm_analysis_batch:
+      job_queue: call-analytics-gpu-queue  
+      memory: 65536
+      vcpus: 16
+      gpu_count: 1
+      timeout: 7200

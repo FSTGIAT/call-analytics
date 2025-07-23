@@ -1,0 +1,235 @@
+// Color variables
+$primary-color: #409eff;
+$success-color: #67c23a;
+$warning-color: #e6a23c;
+$danger-color: #f56c6c;
+$info-color: #909399;
+
+// Layout variables
+$header-height: 60px;
+$sidebar-width: 250px;
+$sidebar-collapsed-width: 64px;
+$footer-height: 40px;
+
+// Font variables
+$font-family-base: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+$font-family-hebrew: 'Segoe UI', 'Arial Hebrew', 'Noto Sans Hebrew', Arial, sans-serif;
+$font-family-monospace: 'Consolas', 'Monaco', 'Courier New', monospace;
+
+// Font sizes
+$font-size-xs: 12px;
+$font-size-sm: 14px;
+$font-size-base: 16px;
+$font-size-lg: 18px;
+$font-size-xl: 20px;
+$font-size-xxl: 24px;
+
+// Spacing variables
+$spacing-xs: 4px;
+$spacing-sm: 8px;
+$spacing-base: 16px;
+$spacing-lg: 24px;
+$spacing-xl: 32px;
+$spacing-xxl: 48px;
+
+// Border radius
+$border-radius-sm: 4px;
+$border-radius-base: 8px;
+$border-radius-lg: 12px;
+$border-radius-xl: 16px;
+
+// Shadow variables
+$shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.1);
+$shadow-base: 0 4px 8px rgba(0, 0, 0, 0.15);
+$shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.2);
+
+// Breakpoints
+$breakpoint-xs: 480px;
+$breakpoint-sm: 768px;
+$breakpoint-md: 1024px;
+$breakpoint-lg: 1280px;
+$breakpoint-xl: 1536px;
+
+// Z-index layers
+$z-index-dropdown: 1000;
+$z-index-modal: 2000;
+$z-index-notification: 3000;
+$z-index-tooltip: 4000;
+
+// Animation variables
+$transition-fast: 0.15s ease;
+$transition-base: 0.3s ease;
+$transition-slow: 0.5s ease;
+
+// Custom theme colors for charts
+$chart-colors: (
+  primary: #409eff,
+  success: #67c23a,
+  warning: #e6a23c,
+  danger: #f56c6c,
+  info: #909399,
+  purple: #8b5cf6,
+  pink: #ec4899,
+  teal: #14b8a6,
+  orange: #f97316,
+  indigo: #6366f1
+);
+
+// Hebrew-specific variables
+$hebrew-line-height: 1.8;
+$hebrew-letter-spacing: 0.02em;
+
+// Dark mode variables
+$dark-bg-color: #1a1a1a;
+$dark-bg-color-light: #2d2d2d;
+$dark-text-color: #e5e5e5;
+$dark-text-color-light: #a3a3a3;
+$dark-border-color: #404040;
+
+// Status colors
+$status-colors: (
+  active: #67c23a,
+  inactive: #909399,
+  pending: #e6a23c,
+  error: #f56c6c,
+  success: #67c23a,
+  warning: #e6a23c,
+  info: #409eff
+);
+
+// Sentiment colors
+$sentiment-colors: (
+  positive: #67c23a,
+  negative: #f56c6c,
+  neutral: #909399
+);
+
+// Priority colors
+$priority-colors: (
+  low: #67c23a,
+  medium: #e6a23c,
+  high: #f56c6c,
+  critical: #c53030
+);
+
+// Call type colors
+$call-type-colors: (
+  support: #409eff,
+  sales: #67c23a,
+  billing: #e6a23c,
+  technical: #8b5cf6,
+  complaint: #f56c6c,
+  inquiry: #909399
+);
+
+// Mixins
+@mixin flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@mixin flex-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+@mixin text-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@mixin rtl-support {
+  [dir="rtl"] & {
+    @content;
+  }
+}
+
+// Dark mode removed - use CSS variables instead
+
+@mixin mobile-only {
+  @media (max-width: #{$breakpoint-sm - 1px}) {
+    @content;
+  }
+}
+
+@mixin tablet-only {
+  @media (min-width: #{$breakpoint-sm}) and (max-width: #{$breakpoint-md - 1px}) {
+    @content;
+  }
+}
+
+@mixin desktop-only {
+  @media (min-width: #{$breakpoint-md}) {
+    @content;
+  }
+}
+
+@mixin card-style {
+  background-color: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-light);
+  border-radius: $border-radius-base;
+  box-shadow: $shadow-sm;
+  padding: $spacing-lg;
+}
+
+@mixin button-style($color) {
+  background-color: $color;
+  border-color: $color;
+  color: white;
+  
+  &:hover {
+    background-color: darken($color, 10%);
+    border-color: darken($color, 10%);
+  }
+  
+  &:active {
+    background-color: darken($color, 15%);
+    border-color: darken($color, 15%);
+  }
+}
+
+@mixin status-badge($color) {
+  background-color: rgba($color, 0.1);
+  color: $color;
+  border: 1px solid rgba($color, 0.3);
+  padding: 4px 8px;
+  border-radius: $border-radius-sm;
+  font-size: $font-size-xs;
+  font-weight: 500;
+}
+
+@mixin loading-skeleton {
+  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background-size: 200% 100%;
+  animation: skeleton-loading 1.5s infinite;
+}
+
+@keyframes skeleton-loading {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+// Hebrew font - use system fonts instead of loading custom fonts
+// The font-family-hebrew variable already includes fallbacks
+
+// Export variables for JavaScript
+:export {
+  primaryColor: $primary-color;
+  successColor: $success-color;
+  warningColor: $warning-color;
+  dangerColor: $danger-color;
+  infoColor: $info-color;
+  headerHeight: $header-height;
+  sidebarWidth: $sidebar-width;
+  sidebarCollapsedWidth: $sidebar-collapsed-width;
+  breakpointSm: $breakpoint-sm;
+  breakpointMd: $breakpoint-md;
+  breakpointLg: $breakpoint-lg;
+}

@@ -1,0 +1,361 @@
+services:
+  # Node.js API Server
+  api:
+    build: 
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: call-analytics-api
+    env_file:
+      - ./config/.env.api
+      - ./config/.env.oracle
+      - ./config/.env.kafka
+    environment:
+      - AUTO_MIGRATE=true
+      - OPENSEARCH_URL=http://opensearch:9200
+      # UTF-8 encoding for Hebrew support
+      - LC_ALL=C.UTF-8
+      - LANG=C.UTF-8
+      - NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+    ports:
+      - "3000:3000"
+    volumes:
+      # - ./api:/app  # Commented out for production - uncomment for development
+      # - /app/node_modules  # Commented out for production
+      - ./logs/api:/app/logs
+    depends_on:
+      - oracle
+      - redis
+      - opensearch
+    networks:
+      - call-analytics-network
+    restart: unless-stopped
+
+  # Flask ML Service
+  ml-service:
+    build:
+      context: ./ml-service
+      dockerfile: Dockerfile
+    container_name: call-analytics-ml
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      # Performance optimizations
+      - MODEL_TEMPERATURE=0.2
+      - MODEL_MAX_TOKENS=400
+      - REQUEST_TIMEOUT=40
+      - OLLAMA_TIMEOUT=40
+      - DEFAULT_MODEL=dictalm2.0-instruct:Q4_K_M
+      - HEBREW_MODEL=dictalm2.0-instruct:Q4_K_M
+    env_file:
+      - ./config/.env.ml
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./ml-service:/app
+      - ./data/models:/app/models
+      - ./data/sentence-transformers:/root/.cache/torch/sentence_transformers
+      - ./data/huggingface:/root/.cache/huggingface
+      - ./logs/ml:/app/logs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - call-analytics-network
+    restart: unless-stopped
+
+  # Vue.js Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: call-analytics-frontend
+    env_file:
+      - ./config/.env.frontend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - api
+    networks:
+      - call-analytics-network
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: call-analytics-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/cache:/data
+    networks:
+      - call-analytics-network
+    restart: unless-stopped
+
+  # OpenSearch for Hebrew text search
+  opensearch:
+    image: opensearchproject/opensearch:2.11.1
+    container_name: call-analytics-opensearch
+    environment:
+      - cluster.name=call-analytics-opensearch
+      - node.name=call-analytics-node-1
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms2g -Xmx2g"
+      - plugins.security.disabled=true
+    env_file:
+      - ./config/.env.search
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+      - opensearch_logs:/usr/share/opensearch/logs
+      - ./config/opensearch/opensearch.yml:/usr/share/opensearch/config/opensearch.yml:ro
+      - ./config/opensearch/index-templates.json:/usr/share/opensearch/config/index-templates.json:ro
+    networks:
+      - call-analytics-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Oracle Database
+  oracle:
+    image: container-registry.oracle.com/database/express:21.3.0-xe
+    container_name: call-analytics-oracle
+    environment:
+      - ORACLE_PWD=Call_Analytics_2024!
+      - ORACLE_CHARACTERSET=AL32UTF8
+      - ORACLE_EDITION=xe
+    ports:
+      - "1521:1521"
+      - "5500:5500"  # Oracle Enterprise Manager Express
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+      - ./oracle/init:/docker-entrypoint-initdb.d
+      - ./config/oracle/init-scripts:/opt/oracle/scripts/startup
+      - ./config/oracle/init-db.sql:/opt/oracle/scripts/setup/01-init-db.sql
+    networks:
+      - call-analytics-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sqlplus", "-S", "sys/Call_Analytics_2024!@localhost:1521/XE as sysdba", "@/opt/oracle/scripts/health-check.sql"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # OpenSearch Dashboards (optional)
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.11.1
+    container_name: call-analytics-dashboards
+    environment:
+      - OPENSEARCH_HOSTS=http://opensearch:9200
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    ports:
+      - "5601:5601"
+    depends_on:
+      - opensearch
+    networks:
+      - call-analytics-network
+    profiles:
+      - dashboards
+
+
+  # Ollama for local LLM (DictaLM 2.0 for Hebrew/English processing)
+  ollama:
+    build:
+      context: ./ollama
+      dockerfile: Dockerfile
+    container_name: call-analytics-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./data/ollama:/root/.ollama
+      - ./ollama/models:/models
+    environment:
+      - OLLAMA_MODELS=/root/.ollama/models
+      - HF_HOME=/root/.cache/huggingface
+      # Performance optimizations (optimized for DictaLM 2.0)
+      - OLLAMA_GPU_MEMORY_FRACTION=0.9
+      - OLLAMA_NUM_GPU_LAYERS=32
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KEEP_ALIVE=15m
+      - OLLAMA_MAX_LOADED_MODELS=1  # Single model for better performance
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_GPU_OVERHEAD=512MB  # Reduced from 1GB
+      - OLLAMA_NUM_BATCH=512
+      - OLLAMA_NUM_THREADS=8
+      # CUDA optimizations
+      - CUDA_VISIBLE_DEVICES=0
+      - CUDA_LAUNCH_BLOCKING=0
+      - CUDA_CACHE_DISABLE=0
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 16G
+    networks:
+      - call-analytics-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # Increased for model loading
+
+  # Zookeeper for Kafka coordination
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: call-analytics-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 2
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    networks:
+      - call-analytics-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Kafka Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: call-analytics-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      # Performance optimizations for call analytics
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168  # 7 days
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824  # 1GB
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000  # 5 minutes
+      # Hebrew text processing optimizations
+      KAFKA_MESSAGE_MAX_BYTES: 10485760  # 10MB for large conversations
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760
+      KAFKA_FETCH_MESSAGE_MAX_BYTES: 10485760
+      # JVM settings for better performance
+      KAFKA_HEAP_OPTS: "-Xmx1G -Xms1G"
+      KAFKA_JVM_PERFORMANCE_OPTS: "-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+      - kafka_logs:/var/lib/kafka/logs
+    networks:
+      - call-analytics-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # Schema Registry for Kafka message schemas
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.4.0
+    container_name: call-analytics-schema-registry
+    depends_on:
+      - kafka
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC: _schemas
+      SCHEMA_REGISTRY_DEBUG: 'true'
+    volumes:
+      - schema_registry_data:/var/lib/schema-registry
+    networks:
+      - call-analytics-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Kafka UI for monitoring and management
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: call-analytics-kafka-ui
+    depends_on:
+      - kafka
+      - schema-registry
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: call-analytics-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      DYNAMIC_CONFIG_ENABLED: 'true'
+      AUTH_TYPE: "DISABLED"
+    networks:
+      - call-analytics-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  call-analytics-network:
+    driver: bridge
+
+volumes:
+  oracle_data:
+  redis_data:
+  opensearch_data:
+  opensearch_logs:
+  ollama_models:
+  # Kafka and Zookeeper data volumes
+  kafka_data:
+  kafka_logs:
+  zookeeper_data:
+  zookeeper_logs:
+  schema_registry_data:

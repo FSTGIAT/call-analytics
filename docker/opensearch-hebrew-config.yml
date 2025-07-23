@@ -1,0 +1,100 @@
+# OpenSearch Hebrew analyzer configuration
+hebrew_analyzer_config:
+  settings:
+    analysis:
+      analyzer:
+        hebrew_analyzer:
+          type: custom
+          tokenizer: standard
+          filter:
+            - lowercase
+            - hebrew_stop
+            - hebrew_stemmer
+            - ascii_folding
+        
+        hebrew_search_analyzer:
+          type: custom
+          tokenizer: keyword
+          filter:
+            - lowercase
+            - ascii_folding
+        
+        hebrew_exact_analyzer:
+          type: custom
+          tokenizer: keyword
+          filter:
+            - lowercase
+      
+      filter:
+        hebrew_stop:
+          type: stop
+          stopwords_path: hebrew_stopwords.txt
+        
+        hebrew_stemmer:
+          type: stemmer
+          language: hebrew
+      
+      normalizer:
+        hebrew_normalizer:
+          type: custom
+          filter:
+            - lowercase
+            - ascii_folding
+  
+  mappings:
+    properties:
+      callId:
+        type: keyword
+      
+      customerId:
+        type: keyword
+      
+      subscriberId:
+        type: keyword
+      
+      transcriptionText:
+        type: text
+        analyzer: hebrew_analyzer
+        search_analyzer: hebrew_search_analyzer
+        fields:
+          exact:
+            type: keyword
+            normalizer: hebrew_normalizer
+          raw:
+            type: text
+            analyzer: hebrew_exact_analyzer
+      
+      callDate:
+        type: date
+      
+      durationSeconds:
+        type: integer
+      
+      language:
+        type: keyword
+      
+      agentId:
+        type: keyword
+      
+      callType:
+        type: keyword
+      
+      sentiment:
+        type: keyword
+      
+      productsMentioned:
+        type: nested
+        properties:
+          name:
+            type: text
+            analyzer: hebrew_analyzer
+          confidence:
+            type: float
+      
+      keyPoints:
+        type: text
+        analyzer: hebrew_analyzer
+      
+      summaryText:
+        type: text
+        analyzer: hebrew_analyzer

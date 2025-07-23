@@ -1,0 +1,112 @@
+# Serverless SageMaker Configuration - Pay Only When Processing
+# Perfect for 10TB VERINT_TEXT_ANALYSIS processing
+
+sagemaker_serverless:
+  # Serverless Inference Endpoint (Auto-scales to zero)
+  embedding_serverless:
+    endpoint_name: call-analytics-embedding-serverless
+    model_name: multilingual-embedding-serverless
+    
+    serverless_config:
+      memory_size_mb: 4096        # 4GB memory
+      max_concurrency: 100        # Max parallel requests
+      
+    auto_scaling:
+      min_capacity: 0             # Scales to ZERO when idle ✅
+      max_capacity: 50            # Scale up to 50 concurrent
+      target_utilization: 70
+      
+    cost_optimization:
+      provisioned_concurrency: 0  # No always-on instances
+      idle_timeout_seconds: 300   # Shutdown after 5 min idle
+      
+  # Batch Transform for Large Processing
+  batch_transform:
+    job_name_prefix: verint-embedding-batch
+    model_name: batch-embedding-model
+    
+    instance_config:
+      instance_type: ml.g4dn.2xlarge
+      instance_count: 1           # Start with 1, scale up as needed
+      max_payload_mb: 100
+      max_concurrent_transforms: 8
+      
+    input_config:
+      data_format: jsonlines
+      batch_size: 1000           # Texts per batch
+      split_type: line
+      
+    output_config:
+      accept: application/json
+      assembleWith: line
+      
+  # Async Inference for Queue-Based Processing  
+  async_inference:
+    endpoint_name: call-analytics-async-inference
+    
+    async_config:
+      output_s3_path: s3://call-analytics-results/async/
+      max_concurrent_invocations: 4
+      
+    auto_scaling:
+      min_capacity: 0             # Pay ONLY when processing ✅
+      max_capacity: 20
+      scale_down_cooldown: 600    # Scale down after 10 min
+      
+    notification_config:
+      success_topic: arn:aws:sns:us-east-1:account:processing-success
+      error_topic: arn:aws:sns:us-east-1:account:processing-error
+
+# Cost Control Configuration
+cost_control:
+  # Budget alerts
+  monthly_budget: 2000          # $2000/month limit
+  daily_budget: 100             # $100/day alert
+  
+  # Auto-shutdown triggers
+  idle_shutdown_minutes: 30     # Shutdown if idle 30 min
+  cost_threshold_shutdown: 500  # Emergency shutdown at $500/day
+  
+  # Monitoring
+  cost_tracking: true
+  usage_reporting: true
+  
+# Processing Strategy for 10TB
+processing_strategy:
+  # Small batches: Use Serverless
+  small_batch:
+    threshold: 10000            # < 10k records
+    method: serverless
+    estimated_cost_per_1k: 0.25 # $0.25 per 1000 records
+    
+  # Medium batches: Use Async  
+  medium_batch:
+    threshold: 100000           # 10k - 100k records
+    method: async_inference
+    estimated_cost_per_1k: 0.15 # $0.15 per 1000 records
+    
+  # Large batches: Use Batch Transform
+  large_batch:
+    threshold: 1000000          # > 100k records  
+    method: batch_transform
+    estimated_cost_per_1k: 0.10 # $0.10 per 1000 records
+    
+# Oracle Integration for Pay-Per-Use
+oracle_integration:
+  # CDC triggers for real-time processing
+  cdc_processing:
+    method: serverless          # Use serverless for CDC
+    batch_size: 100             # Small batches for real-time
+    max_delay_seconds: 300      # Process within 5 minutes
+    
+  # Bulk processing for historical data
+  bulk_processing:
+    method: batch_transform     # Use batch for large jobs
+    chunk_size: 50000          # 50k records per job
+    parallel_jobs: 10           # 10 parallel batch jobs
+    
+  # Monitoring and alerting
+  monitoring:
+    cost_per_hour_alert: 50     # Alert if > $50/hour
+    idle_detection: true        # Detect and shutdown idle resources
+    usage_optimization: true    # Automatic optimization suggestions

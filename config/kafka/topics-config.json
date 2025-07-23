@@ -1,0 +1,124 @@
+{
+  "topics": {
+    "cdc-raw-changes": {
+      "partitions": 6,
+      "replication": 1,
+      "config": {
+        "retention.ms": 604800000,
+        "compression.type": "gzip",
+        "max.message.bytes": 10485760,
+        "segment.bytes": 1073741824,
+        "cleanup.policy": "delete"
+      },
+      "description": "Raw change data capture events from Oracle database"
+    },
+    "conversation-assembly": {
+      "partitions": 3,
+      "replication": 1,
+      "config": {
+        "retention.ms": 86400000,
+        "compression.type": "gzip", 
+        "max.message.bytes": 10485760,
+        "segment.bytes": 536870912,
+        "cleanup.policy": "delete"
+      },
+      "description": "Complete conversations assembled from individual messages"
+    },
+    "ml-processing-queue": {
+      "partitions": 4,
+      "replication": 1,
+      "config": {
+        "retention.ms": 86400000,
+        "compression.type": "gzip",
+        "max.message.bytes": 20971520,
+        "segment.bytes": 536870912,
+        "cleanup.policy": "delete"
+      },
+      "description": "Conversations ready for ML processing (embeddings, sentiment analysis)"
+    },
+    "opensearch-bulk-index": {
+      "partitions": 2,
+      "replication": 1,
+      "config": {
+        "retention.ms": 86400000,
+        "compression.type": "gzip",
+        "max.message.bytes": 20971520,
+        "segment.bytes": 536870912,
+        "cleanup.policy": "delete"
+      },
+      "description": "ML-processed conversations ready for OpenSearch indexing"
+    },
+    "failed-records-dlq": {
+      "partitions": 1,
+      "replication": 1,
+      "config": {
+        "retention.ms": 2592000000,
+        "compression.type": "gzip",
+        "max.message.bytes": 20971520,
+        "segment.bytes": 268435456,
+        "cleanup.policy": "delete"
+      },
+      "description": "Dead letter queue for failed message processing"
+    },
+    "processing-metrics": {
+      "partitions": 1,
+      "replication": 1,
+      "config": {
+        "retention.ms": 604800000,
+        "compression.type": "gzip",
+        "max.message.bytes": 1048576,
+        "segment.bytes": 268435456,
+        "cleanup.policy": "delete"
+      },
+      "description": "Processing metrics and monitoring events"
+    }
+  },
+  "consumer_groups": {
+    "call-analytics-conversation-assembly": {
+      "consumers": 2,
+      "session_timeout_ms": 30000,
+      "heartbeat_interval_ms": 3000,
+      "max_poll_interval_ms": 300000,
+      "auto_offset_reset": "earliest"
+    },
+    "call-analytics-ml-processing": {
+      "consumers": 3,
+      "session_timeout_ms": 45000,
+      "heartbeat_interval_ms": 3000,
+      "max_poll_interval_ms": 600000,
+      "auto_offset_reset": "earliest"
+    },
+    "call-analytics-opensearch-indexing": {
+      "consumers": 2,
+      "session_timeout_ms": 30000,
+      "heartbeat_interval_ms": 3000,
+      "max_poll_interval_ms": 300000,
+      "auto_offset_reset": "earliest"
+    },
+    "call-analytics-error-handler": {
+      "consumers": 1,
+      "session_timeout_ms": 30000,
+      "heartbeat_interval_ms": 3000,
+      "max_poll_interval_ms": 300000,
+      "auto_offset_reset": "earliest"
+    }
+  },
+  "schema_subjects": {
+    "cdc-raw-changes-value": {
+      "schema_type": "AVRO",
+      "compatibility": "BACKWARD"
+    },
+    "conversation-assembly-value": {
+      "schema_type": "AVRO", 
+      "compatibility": "BACKWARD"
+    },
+    "ml-processing-queue-value": {
+      "schema_type": "AVRO",
+      "compatibility": "BACKWARD"
+    },
+    "opensearch-bulk-index-value": {
+      "schema_type": "AVRO",
+      "compatibility": "BACKWARD"
+    }
+  }
+}

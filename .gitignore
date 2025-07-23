@@ -1,0 +1,149 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.venv/
+venv/
+ENV/
+env/
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+.eggs/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# Environment files (contain secrets)
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Data directories (local development)
+data/cache/*
+data/vector/*
+data/graph/*
+data/opensearch/*
+data/ollama/*
+data/models/*
+!data/**/.gitkeep
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Testing
+coverage/
+.coverage
+htmlcov/
+.pytest_cache/
+.phpunit.result.cache
+
+# Docker
+docker-compose.override.yml
+
+# Oracle wallet and connection files
+data/oracle/wallet/
+data/oracle/*.ora
+data/oracle/*.properties
+
+# ML Models (large files)
+*.pt
+*.bin
+*.onnx
+*.h5
+*.pkl
+*.joblib
+*.safetensors
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+.cache/
+
+# Security
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+
+# Package files
+*.jar
+*.war
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
+# Vue.js specific
+.nuxt/
+.next/
+.cache/
+.parcel-cache/
+
+# Python specific
+*.py[cod]
+*$py.class
+*.so
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+
+# Database dumps
+*.sql
+*.dump
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# macOS
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Windows
+Desktop.ini
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*

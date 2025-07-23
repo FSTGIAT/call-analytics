@@ -1,0 +1,220 @@
+{
+  "neptune_config": {
+    "cluster_identifier": "call-analytics-neptune-cluster",
+    "engine": "neptune",
+    "instance_class": "db.t3.medium",
+    "allocated_storage": 20,
+    "storage_type": "standard",
+    "multi_az": false,
+    "publicly_accessible": false,
+    "backup_retention_period": 7,
+    "preferred_backup_window": "03:00-04:00",
+    "preferred_maintenance_window": "sun:04:00-sun:05:00",
+    "enable_cloudwatch_logs_exports": ["audit"],
+    "deletion_protection": false
+  },
+  "graph_schema": {
+    "vertices": {
+      "Customer": {
+        "properties": {
+          "customerId": "string",
+          "name": "string",
+          "createdAt": "datetime"
+        },
+        "indexes": ["customerId"]
+      },
+      "Subscriber": {
+        "properties": {
+          "subscriberId": "string",
+          "customerId": "string",
+          "phoneNumber": "string",
+          "name": "string",
+          "registeredAt": "datetime",
+          "status": "string"
+        },
+        "indexes": ["subscriberId", "customerId", "phoneNumber"]
+      },
+      "Agent": {
+        "properties": {
+          "agentId": "string",
+          "customerId": "string",
+          "name": "string",
+          "department": "string",
+          "performanceScore": "float",
+          "joinedAt": "datetime"
+        },
+        "indexes": ["agentId", "customerId"]
+      },
+      "Call": {
+        "properties": {
+          "callId": "string",
+          "customerId": "string",
+          "subscriberId": "string",
+          "agentId": "string",
+          "callDate": "datetime",
+          "durationSeconds": "int",
+          "callType": "string",
+          "language": "string",
+          "sentiment": "string",
+          "resolved": "boolean",
+          "urgency": "string"
+        },
+        "indexes": ["callId", "customerId", "callDate"]
+      },
+      "Topic": {
+        "properties": {
+          "topicId": "string",
+          "name": "string",
+          "category": "string",
+          "frequency": "int",
+          "createdAt": "datetime"
+        },
+        "indexes": ["topicId", "name"]
+      },
+      "Product": {
+        "properties": {
+          "productId": "string",
+          "name": "string",
+          "category": "string",
+          "description": "string",
+          "active": "boolean"
+        },
+        "indexes": ["productId", "name"]
+      },
+      "Issue": {
+        "properties": {
+          "issueId": "string",
+          "description": "string",
+          "severity": "string",
+          "category": "string",
+          "resolution": "string",
+          "createdAt": "datetime"
+        },
+        "indexes": ["issueId", "category"]
+      }
+    },
+    "edges": {
+      "BELONGS_TO": {
+        "from": "Subscriber",
+        "to": "Customer",
+        "properties": {
+          "relationshipType": "string",
+          "since": "datetime"
+        }
+      },
+      "WORKS_FOR": {
+        "from": "Agent",
+        "to": "Customer",
+        "properties": {
+          "role": "string",
+          "since": "datetime"
+        }
+      },
+      "MADE_CALL": {
+        "from": "Subscriber",
+        "to": "Call",
+        "properties": {
+          "initiatedAt": "datetime"
+        }
+      },
+      "HANDLED_CALL": {
+        "from": "Agent",
+        "to": "Call",
+        "properties": {
+          "answeredAt": "datetime",
+          "transferredFrom": "string"
+        }
+      },
+      "DISCUSSES": {
+        "from": "Call",
+        "to": "Topic",
+        "properties": {
+          "relevanceScore": "float",
+          "mentions": "int"
+        }
+      },
+      "MENTIONS_PRODUCT": {
+        "from": "Call",
+        "to": "Product",
+        "properties": {
+          "context": "string",
+          "sentiment": "string",
+          "mentions": "int"
+        }
+      },
+      "REPORTS_ISSUE": {
+        "from": "Call",
+        "to": "Issue",
+        "properties": {
+          "severity": "string",
+          "resolved": "boolean",
+          "resolutionTime": "int"
+        }
+      },
+      "FOLLOWS_UP": {
+        "from": "Call",
+        "to": "Call",
+        "properties": {
+          "followUpType": "string",
+          "timeDifference": "int"
+        }
+      },
+      "SIMILAR_TO": {
+        "from": "Call",
+        "to": "Call",
+        "properties": {
+          "similarityScore": "float",
+          "commonTopics": "list",
+          "algorithm": "string"
+        }
+      },
+      "ESCALATED_TO": {
+        "from": "Agent",
+        "to": "Agent",
+        "properties": {
+          "escalationType": "string",
+          "reason": "string",
+          "callId": "string"
+        }
+      },
+      "RELATED_PRODUCT": {
+        "from": "Product",
+        "to": "Product",
+        "properties": {
+          "relationType": "string",
+          "strength": "float"
+        }
+      }
+    }
+  },
+  "queries": {
+    "customer_call_patterns": {
+      "description": "Find call patterns for a specific customer",
+      "gremlin": "g.V().has('Customer', 'customerId', customerId).in('BELONGS_TO').out('MADE_CALL').has('callDate', gte(startDate)).has('callDate', lt(endDate)).group().by('callType').by(count())"
+    },
+    "agent_performance": {
+      "description": "Analyze agent performance metrics",
+      "gremlin": "g.V().has('Agent', 'customerId', customerId).as('agent').out('HANDLED_CALL').as('call').select('agent', 'call').group().by(select('agent').values('agentId')).by(select('call').group().by('sentiment').by(count()))"
+    },
+    "conversation_flow": {
+      "description": "Track conversation flow and escalations",
+      "gremlin": "g.V().has('Call', 'callId', callId).repeat(out('FOLLOWS_UP')).emit().path().by(valueMap('callId', 'agentId', 'sentiment', 'callDate'))"
+    },
+    "product_mention_network": {
+      "description": "Find product co-mention patterns",
+      "gremlin": "g.V().has('Product', 'name', productName).in('MENTIONS_PRODUCT').out('MENTIONS_PRODUCT').dedup().groupCount().order(local).by(values, desc).limit(local, 10)"
+    },
+    "similar_calls": {
+      "description": "Find calls similar to a given call",
+      "gremlin": "g.V().has('Call', 'callId', callId).out('SIMILAR_TO').has('similarityScore', gte(threshold)).order().by('similarityScore', desc).limit(limit)"
+    },
+    "issue_resolution_path": {
+      "description": "Track issue resolution patterns",
+      "gremlin": "g.V().has('Issue', 'category', issueCategory).in('REPORTS_ISSUE').has('resolved', true).out('HANDLED_CALL').group().by('agentId').by(values('resolutionTime').mean())"
+    },
+    "subscriber_journey": {
+      "description": "Map subscriber interaction journey",
+      "gremlin": "g.V().has('Subscriber', 'subscriberId', subscriberId).out('MADE_CALL').order().by('callDate').valueMap('callId', 'callDate', 'sentiment', 'callType', 'resolved')"
+    }
+  }
+}

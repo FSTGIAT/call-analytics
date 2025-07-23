@@ -1,0 +1,236 @@
+{
+  "call_transcriptions_template": {
+    "index_patterns": ["call-analytics-*-transcriptions"],
+    "template": {
+      "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "analysis": {
+          "analyzer": {
+            "hebrew_analyzer": {
+              "type": "custom",
+              "tokenizer": "standard",
+              "filter": [
+                "lowercase",
+                "hebrew_stop",
+                "hebrew_stemmer",
+                "asciifolding"
+              ]
+            },
+            "hebrew_search_analyzer": {
+              "type": "custom",
+              "tokenizer": "standard",
+              "filter": [
+                "lowercase",
+                "hebrew_stop",
+                "asciifolding"
+              ]
+            },
+            "multilingual_analyzer": {
+              "type": "custom",
+              "tokenizer": "standard",
+              "filter": [
+                "lowercase",
+                "stop",
+                "asciifolding"
+              ]
+            }
+          },
+          "filter": {
+            "hebrew_stop": {
+              "type": "stop",
+              "stopwords": [
+                "את", "על", "של", "אל", "מן", "כל", "אם", "או", "כי", "לא", "לו", 
+                "אך", "גם", "כך", "זה", "זו", "הוא", "היא", "הם", "הן", "אני", "אתה", 
+                "אתם", "אתן", "אנחנו", "ואת", "ועל", "ושל", "ואל", "ומן", "וכל", 
+                "ואם", "ואו", "וכי", "ולא", "ולו", "ואך", "וגם", "וכך", "וזה", "וזו", 
+                "והוא", "והיא", "והם", "והן", "ואני", "ואתה", "ואתם", "ואתן", "ואנחנו"
+              ]
+            },
+            "hebrew_stemmer": {
+              "type": "stemmer",
+              "language": "hebrew"
+            }
+          }
+        }
+      },
+      "mappings": {
+        "properties": {
+          "callId": {
+            "type": "keyword",
+            "index": true
+          },
+          "customerId": {
+            "type": "keyword",
+            "index": true
+          },
+          "subscriberId": {
+            "type": "keyword",
+            "index": true
+          },
+          "transcriptionText": {
+            "type": "text",
+            "analyzer": "hebrew_analyzer",
+            "search_analyzer": "hebrew_search_analyzer",
+            "fields": {
+              "raw": {
+                "type": "keyword"
+              },
+              "multilingual": {
+                "type": "text",
+                "analyzer": "multilingual_analyzer"
+              }
+            }
+          },
+          "processedText": {
+            "type": "text",
+            "analyzer": "hebrew_analyzer",
+            "search_analyzer": "hebrew_search_analyzer"
+          },
+          "language": {
+            "type": "keyword",
+            "index": true
+          },
+          "callDate": {
+            "type": "date",
+            "format": "yyyy-MM-dd'T'HH:mm:ss'Z'||yyyy-MM-dd'T'HH:mm:ssZ||yyyy-MM-dd||epoch_millis"
+          },
+          "durationSeconds": {
+            "type": "integer"
+          },
+          "agentId": {
+            "type": "keyword",
+            "index": true
+          },
+          "callType": {
+            "type": "keyword",
+            "index": true
+          },
+          "sentiment": {
+            "type": "keyword",
+            "index": true
+          },
+          "productsMentioned": {
+            "type": "keyword",
+            "index": true
+          },
+          "keyPoints": {
+            "type": "text",
+            "analyzer": "hebrew_analyzer",
+            "search_analyzer": "hebrew_search_analyzer"
+          },
+          "entities": {
+            "type": "nested",
+            "properties": {
+              "type": {
+                "type": "keyword"
+              },
+              "value": {
+                "type": "keyword"
+              },
+              "confidence": {
+                "type": "float"
+              }
+            }
+          },
+          "phoneNumbers": {
+            "type": "keyword",
+            "index": true
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "main_points": {
+                "type": "text",
+                "analyzer": "hebrew_analyzer"
+              },
+              "customer_satisfaction": {
+                "type": "keyword"
+              },
+              "issue_resolved": {
+                "type": "boolean"
+              },
+              "followup_required": {
+                "type": "boolean"
+              }
+            }
+          },
+          "indexedAt": {
+            "type": "date",
+            "format": "yyyy-MM-dd'T'HH:mm:ss'Z'"
+          },
+          "embedding": {
+            "type": "dense_vector",
+            "dims": 384
+          }
+        }
+      }
+    }
+  },
+  "call_summaries_template": {
+    "index_patterns": ["call-analytics-*-summaries"],
+    "template": {
+      "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "analysis": {
+          "analyzer": {
+            "hebrew_analyzer": {
+              "type": "custom",
+              "tokenizer": "standard",
+              "filter": [
+                "lowercase",
+                "hebrew_stop",
+                "hebrew_stemmer"
+              ]
+            }
+          },
+          "filter": {
+            "hebrew_stop": {
+              "type": "stop",
+              "stopwords": [
+                "את", "על", "של", "אל", "מן", "כל", "אם", "או", "כי", "לא", "לו"
+              ]
+            },
+            "hebrew_stemmer": {
+              "type": "stemmer",
+              "language": "hebrew"
+            }
+          }
+        }
+      },
+      "mappings": {
+        "properties": {
+          "callId": {
+            "type": "keyword",
+            "index": true
+          },
+          "customerId": {
+            "type": "keyword",
+            "index": true
+          },
+          "summaryText": {
+            "type": "text",
+            "analyzer": "hebrew_analyzer"
+          },
+          "keyTopics": {
+            "type": "keyword",
+            "index": true
+          },
+          "sentiment": {
+            "type": "keyword",
+            "index": true
+          },
+          "urgency": {
+            "type": "keyword",
+            "index": true
+          },
+          "createdAt": {
+            "type": "date",
+            "format": "yyyy-MM-dd'T'HH:mm:ss'Z'"
+          }
+        }
+      }
+    }
+  }
+}

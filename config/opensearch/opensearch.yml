@@ -1,0 +1,34 @@
+cluster.name: call-analytics-opensearch
+node.name: call-analytics-node-1
+path.data: /usr/share/opensearch/data
+path.logs: /usr/share/opensearch/logs
+
+# Network settings
+network.host: 0.0.0.0
+http.port: 9200
+transport.port: 9300
+
+# Single node cluster configuration
+discovery.type: single-node
+
+# Hebrew language support
+plugins.security.ssl.http.enabled: false
+plugins.security.ssl.transport.enabled: false
+
+# Memory and performance
+indices.memory.index_buffer_size: 20%
+indices.fielddata.cache.size: 30%
+
+# Note: Index-level settings for Hebrew analysis are defined in index templates
+# These settings cannot be placed in the node configuration
+
+# Cluster settings
+cluster.routing.allocation.disk.threshold_enabled: false
+action.auto_create_index: true
+action.destructive_requires_name: false
+
+# JVM heap size optimization
+bootstrap.memory_lock: true
+
+# Logging levels are configured in log4j2.properties
+# logger.org.opensearch: INFO
