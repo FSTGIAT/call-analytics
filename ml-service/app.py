@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 # Import utilities and services
 # Removed hebrew_processor - DictaLM and AlephBERT handle Hebrew natively
 from src.services.llm_orchestrator import llm_orchestrator
-from src.services.huggingface_service import huggingface_service
+# from src.services.huggingface_service import huggingface_service  # Using Ollama instead
 # from src.services.bedrock_service import bedrock_service  # Removed - not using Bedrock
 from src.services.embedding_service import embedding_service
 from src.services.weaviate_service import weaviate_service

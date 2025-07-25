@@ -43,12 +43,8 @@ Thumbs.db
 !.env.template
 
 # Data directories (local development)
-data/cache/*
-data/vector/*
-data/graph/*
-data/opensearch/*
-data/ollama/*
-data/models/*
+data/
+ollama/
 !data/**/.gitkeep
 
 # Logs

@@ -102,14 +102,14 @@ class OllamaService:
         # ONLY DictaLM - no other models!
         self.config = OllamaConfig(
             base_url=os.getenv('OLLAMA_BASE_URL', 'http://ollama:11434'),
-            model_name='dictalm2.0-instruct:Q4_K_M',  # DictaLM ONLY
+            model_name=os.getenv('DEFAULT_MODEL', 'dictalm-fast'),  # Use env variable
             temperature=float(os.getenv('MODEL_TEMPERATURE', '0.2')),  # Lower for faster, more focused responses
-            max_tokens=int(os.getenv('MODEL_MAX_TOKENS', '8000')),  # Much larger for Hebrew conversation analysis
-            timeout=int(os.getenv('REQUEST_TIMEOUT', '15'))  # Aggressive timeout
+            max_tokens=int(os.getenv('MODEL_MAX_TOKENS', '300')),  # Smaller for faster responses
+            timeout=int(os.getenv('REQUEST_TIMEOUT', '10'))  # Very aggressive timeout
         )
         
         # Always use DictaLM for everything
-        self.hebrew_model = 'dictalm2.0-instruct:Q4_K_M'
+        self.hebrew_model = os.getenv('HEBREW_MODEL', 'dictalm-fast')
         self.use_dictalm_for_hebrew = True  # Always true - DictaLM is our primary model
         
         # Initialize inference cache
@@ -213,7 +213,7 @@ class OllamaService:
         start_time = datetime.now()
         
         # Always use DictaLM - it handles Hebrew, English, and mixed text perfectly
-        model_name = 'dictalm2.0-instruct:Q4_K_M'
+        model_name = self.hebrew_model
         logger.info(f"Using DictaLM model: {model_name}")
         
         temp = temperature if temperature is not None else self.config.temperature
@@ -242,7 +242,7 @@ class OllamaService:
                     "options": {
                         "temperature": temp,
                         "num_predict": max_tok,
-                        "num_ctx": 16384,  # Much larger context window for Hebrew conversations
+                        "num_ctx": 2048,  # Smaller context window for faster processing
                         "repeat_penalty": 1.1,  # Restore original
                     },
                     "stream": False

@@ -46,6 +46,8 @@ services:
       - OLLAMA_TIMEOUT=40
       - DEFAULT_MODEL=dictalm2.0-instruct:Q4_K_M
       - HEBREW_MODEL=dictalm2.0-instruct:Q4_K_M
+      # HuggingFace token (loaded from env file)
+      - HF_TOKEN=${HF_TOKEN}
     env_file:
       - ./config/.env.ml
     ports:
@@ -58,6 +60,8 @@ services:
       - ./logs/ml:/app/logs
     deploy:
       resources:
+        limits:
+          memory: 2G
         reservations:
           devices:
             - driver: nvidia
@@ -108,10 +112,14 @@ services:
       - node.name=call-analytics-node-1
       - discovery.type=single-node
       - bootstrap.memory_lock=true
-      - "OPENSEARCH_JAVA_OPTS=-Xms2g -Xmx2g"
+      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx3g"
       - plugins.security.disabled=true
     env_file:
       - ./config/.env.search
+    deploy:
+      resources:
+        limits:
+          memory: 4G
     ulimits:
       memlock:
         soft: -1
@@ -152,6 +160,10 @@ services:
       - ./oracle/init:/docker-entrypoint-initdb.d
       - ./config/oracle/init-scripts:/opt/oracle/scripts/startup
       - ./config/oracle/init-db.sql:/opt/oracle/scripts/setup/01-init-db.sql
+    deploy:
+      resources:
+        limits:
+          memory: 2G
     networks:
       - call-analytics-network
     restart: unless-stopped
@@ -200,7 +212,7 @@ services:
       - OLLAMA_KEEP_ALIVE=15m
       - OLLAMA_MAX_LOADED_MODELS=1  # Single model for better performance
       - OLLAMA_NUM_PARALLEL=4
-      - OLLAMA_GPU_OVERHEAD=512MB  # Reduced from 1GB
+      # - OLLAMA_GPU_OVERHEAD=512MB  # Commented out - invalid format causing warnings
       - OLLAMA_NUM_BATCH=512
       - OLLAMA_NUM_THREADS=8
       # CUDA optimizations

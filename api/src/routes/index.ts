@@ -8,6 +8,7 @@ import { scaleRoutes } from './scale.routes';
 import { realtimeCDCRoutes } from './realtime-cdc.routes';
 import { aiRoutes } from './ai.routes';
 import kafkaMonitoringRoutes from './kafka-monitoring.routes';
+import mcpAdminRoutes from './mcp-admin.routes';
 
 const router = Router();
 
@@ -21,6 +22,7 @@ router.use('/scale', scaleRoutes);
 router.use('/realtime-cdc', realtimeCDCRoutes);
 router.use('/ai', aiRoutes);
 router.use('/kafka', kafkaMonitoringRoutes);
+router.use('/admin/mcp', mcpAdminRoutes);
 
 // API info
 router.get('/', (req, res) => {
@@ -36,7 +38,8 @@ router.get('/', (req, res) => {
       scale: '/scale',
       'realtime-cdc': '/realtime-cdc',
       ai: '/ai',
-      kafka: '/kafka'
+      kafka: '/kafka',
+      'admin/mcp': '/admin/mcp'
     }
   });
 });

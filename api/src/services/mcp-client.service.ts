@@ -60,6 +60,7 @@ export class MCPClientService {
   private config: MCPConfig;
   private contextWindows: Map<string, ContextWindow> = new Map();
   private loadBalancingMetrics: LoadBalancingMetrics;
+  private forceLocal: boolean = false;
   private routingStats = {
     localRequests: 0,
     cloudRequests: 0,
@@ -75,6 +76,9 @@ export class MCPClientService {
       retries: parseInt(process.env.MCP_RETRIES || '3'),
       fallbackEnabled: process.env.MCP_FALLBACK_ENABLED !== 'false'
     };
+
+    // Initialize force local mode from environment
+    this.forceLocal = process.env.MCP_FORCE_LOCAL_MODE === 'true';
 
     this.loadBalancingMetrics = {
       localLLM: {
@@ -93,6 +97,9 @@ export class MCPClientService {
     };
 
     logger.info(`MCP Client Service initialized: ${this.config.enabled ? 'enabled' : 'disabled'}`);
+    
+    // Reset metrics to ensure local LLM is preferred after DictaLM optimization
+    this.resetMetrics();
   }
 
   async processLLMRequest(
@@ -109,8 +116,11 @@ export class MCPClientService {
         this.updateContextWindow(conversationId, 'user', request.prompt);
       }
 
-      // Smart routing decision
-      const useLocalLLM = await this.shouldUseLocalLLM(request, customerContext);
+      // Auto-reset metrics if needed
+      this.autoResetMetricsIfNeeded();
+      
+      // Smart routing decision (with force local override)
+      const useLocalLLM = this.forceLocal || await this.shouldUseLocalLLM(request, customerContext);
       
       if (useLocalLLM) {
         logger.debug(`Routing request to local LLM for customer ${customerContext.customerId}`);
@@ -162,7 +172,7 @@ export class MCPClientService {
     const localScore = Object.values(localFactors).reduce((a, b) => a * b, 1);
     
     const shouldUseLocal = localScore > 0.5 && 
-           this.loadBalancingMetrics.localLLM.avgResponseTime < 10000 &&
+           this.loadBalancingMetrics.localLLM.avgResponseTime < 25000 &&
            this.loadBalancingMetrics.localLLM.errorRate < 0.5;
     
     logger.debug('Local LLM routing decision:', {
@@ -568,6 +578,33 @@ Available context if needed: ${conversationHistory}`;
 
   getConfig(): MCPConfig {
     return { ...this.config };
+  }
+
+  // Reset metrics to allow local LLM usage after optimization
+  resetMetrics(): void {
+    this.loadBalancingMetrics.localLLM.avgResponseTime = 1000;
+    this.loadBalancingMetrics.localLLM.errorRate = 0;
+    this.loadBalancingMetrics.localLLM.available = true;
+    this.loadBalancingMetrics.localLLM.lastHealthCheck = new Date().toISOString();
+    
+    logger.info('MCP routing metrics reset - local LLM metrics refreshed');
+  }
+
+  // Auto-reset metrics if they get too high
+  autoResetMetricsIfNeeded(): void {
+    const currentAvgTime = this.loadBalancingMetrics.localLLM.avgResponseTime;
+    const threshold = parseInt(process.env.MCP_AUTO_RESET_THRESHOLD || '20000');
+    
+    if (currentAvgTime > threshold) {
+      logger.warn(`Auto-resetting metrics: avgResponseTime ${currentAvgTime}ms exceeds ${threshold}ms threshold`);
+      this.resetMetrics();
+    }
+  }
+
+  // Force local LLM usage (bypass routing logic)
+  forceLocalMode(enabled: boolean): void {
+    this.forceLocal = enabled;
+    logger.info(`Force local mode: ${enabled ? 'enabled' : 'disabled'}`);
   }
 }
 

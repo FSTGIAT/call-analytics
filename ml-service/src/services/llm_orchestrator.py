@@ -25,9 +25,9 @@ class LLMOrchestrator:
         
         # DictaLM is our ONLY model - handles Hebrew and English perfectly
         self._model_cache = {
-            'hebrew_model': 'dictalm2.0-instruct:Q4_K_M',
-            'english_model': 'dictalm2.0-instruct:Q4_K_M',  # DictaLM handles English too
-            'default_model': 'dictalm2.0-instruct:Q4_K_M'
+            'hebrew_model': os.getenv('HEBREW_MODEL', 'dictalm-fast'),
+            'english_model': os.getenv('DEFAULT_MODEL', 'dictalm-fast'),  # DictaLM handles English too
+            'default_model': os.getenv('DEFAULT_MODEL', 'dictalm-fast')
         }
         
         # Optimized timeouts for faster processing
@@ -50,61 +50,7 @@ class LLMOrchestrator:
         
         logger.info("🚀 Optimized LLM Orchestrator initialized with fast model selection")
     
-    def _analyze_query_complexity(self, prompt: str, system_prompt: Optional[str] = None) -> float:
-        """
-        Analyze query complexity using keyword detection and length metrics.
-        """
-        prompt_clean = prompt.strip().lower()
-        
-        # Simple count/number queries (low complexity)
-        simple_patterns = ['כמה', 'מספר', 'how many', 'total', 'count', 'סך הכל', 'בסך הכל']
-        if any(pattern in prompt_clean for pattern in simple_patterns):
-            return 1.0  # Simple queries
-        
-        # Greeting patterns (lowest complexity)
-        greeting_patterns = ['שלום', 'הי', 'hello', 'hi', 'מה שלומך', 'how are you']
-        if any(pattern in prompt_clean for pattern in greeting_patterns):
-            return 0.5  # Very simple
-        
-        # Medium analysis keywords  
-        medium_keywords = ['הצג', 'show', 'display', 'list', 'רשימה', 'מי', 'who', 'מה', 'what']
-        if any(keyword in prompt_clean for keyword in medium_keywords):
-            return 1.5  # Medium complexity
-        
-        # Complex analysis keywords
-        complex_keywords = ['נתח', 'ניתוח', 'analyze', 'analysis', 'סיכום', 'סכם', 'summary', 'summarize', 'דוח', 'report', 'תובנות', 'insights', 'השווה', 'compare', 'מגמות', 'trends']
-        if any(keyword in prompt_clean for keyword in complex_keywords):
-            return 2.5  # Complex analysis
-        
-        # Length-based fallback (more conservative)
-        if len(prompt_clean) <= 30:
-            return 1.0  # Simple
-        elif len(prompt_clean) <= 80:
-            return 1.5  # Medium
-        else:
-            return 2.0  # Complex but not maximum
-    
-    def _calculate_adaptive_timeout(self, complexity_score: float) -> int:
-        """
-        Calculate adaptive timeout based on complexity score.
-        """
-        base_timeout = self._timeouts['ollama_timeout']
-        
-        if complexity_score >= 2.5:
-            # Very complex queries (CTO dashboards, multi-dimensional analysis)
-            adaptive_timeout = int(base_timeout * 2.5)  # 37.5s for very complex
-        elif complexity_score >= 2.0:
-            # Complex queries (executive summaries, analytics)
-            adaptive_timeout = int(base_timeout * 2.0)  # 30s for complex
-        elif complexity_score >= 1.5:
-            # Moderate queries (multi-part questions)
-            adaptive_timeout = int(base_timeout * 1.5)  # 22.5s for moderate
-        else:
-            # Simple queries (single questions)
-            adaptive_timeout = base_timeout  # 15s for simple
-            
-        logger.info(f"⏱️ Adaptive timeout: {adaptive_timeout}s (complexity: {complexity_score:.2f})")
-        return adaptive_timeout
+    # Removed complex query analysis - using fixed fast timeouts for all queries
     
     async def health_check(self) -> Dict:
         """Check health of all LLM services."""
@@ -176,7 +122,7 @@ class LLMOrchestrator:
         has_hebrew = any(ord(char) >= 0x0590 and ord(char) <= 0x05FF for char in prompt)
         
         # Use configurable timeout from environment
-        fixed_timeout = int(os.getenv('OLLAMA_TIMEOUT', '40'))  # Use env variable with 40s default
+        fixed_timeout = int(os.getenv('OLLAMA_TIMEOUT', '12'))  # Use env variable with 12s default
         
         # Fast model selection using cached configuration
         selected_model = self._model_cache['hebrew_model'] if has_hebrew else self._model_cache['english_model']
@@ -211,7 +157,7 @@ class LLMOrchestrator:
                         service.generate_response(
                             prompt=prompt,
                             system_prompt=system_prompt,
-                            max_tokens=kwargs.get('max_tokens', 1000),  # Reduced from 1500
+                            max_tokens=kwargs.get('max_tokens', 300),  # Much smaller for faster responses
                             temperature=kwargs.get('temperature', 0.3),
                             # Removed model_preference - not supported by Ollama service
                             **kwargs
