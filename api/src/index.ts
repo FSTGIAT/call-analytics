@@ -157,14 +157,16 @@ async function startServer() {
         logger.info('ML processing consumer started');
 
         // Start OpenSearch indexing consumer
+        logger.info('🔍 Initializing OpenSearch indexing consumer...');
         const opensearchConsumer = getOpenSearchIndexingConsumer();
         await opensearchConsumer.start();
-        logger.info('OpenSearch indexing consumer started');
+        logger.info('✅ OpenSearch indexing consumer started successfully');
 
-        // Start error handler consumer
-        const errorConsumer = getErrorHandlerConsumer();
-        await errorConsumer.start();
-        logger.info('Error handler consumer started');
+        // Start error handler consumer - DISABLED to prevent DLQ infinite loops
+        // const errorConsumer = getErrorHandlerConsumer();
+        // await errorConsumer.start();
+        // logger.info('Error handler consumer started');
+        logger.info('Error handler consumer DISABLED to prevent infinite DLQ loops');
 
         logger.info('All Kafka consumer services started successfully');
       } catch (kafkaError) {

@@ -47,44 +47,44 @@ export class KafkaCDCProducerService extends EventEmitter {
     }
 
     private async checkCDCMode(): Promise<void> {
+        // Normal mode is ALWAYS enabled - it should work independently of database configuration
+        this.mode.normal = true;
+        
         try {
-            // Use the existing CDC_PROCESSING_STATUS table
+            // Only check for HISTORICAL mode configuration in database
             const result = await oracleService.executeQuery(
                 `SELECT TABLE_NAME, TOTAL_PROCESSED, LAST_PROCESSED_TIMESTAMP 
                  FROM CDC_PROCESSING_STATUS 
-                 WHERE TABLE_NAME IN ('CDC_NORMAL_MODE', 'CDC_HISTORICAL_MODE')`,
+                 WHERE TABLE_NAME = 'CDC_HISTORICAL_MODE'`,
                 {}
             );
 
             if (result?.length > 0) {
-                for (const row of result) {
-                    const tableName = row[0];
-                    const isEnabled = row[1] === 1;
-                    const lastTimestamp = row[2];
+                const row = result[0];
+                const isEnabled = row[1] === 1;
+                const lastTimestamp = row[2];
 
-                    if (tableName === 'CDC_NORMAL_MODE') {
-                        this.mode.normal = true; // Normal mode is always enabled
-                    } else if (tableName === 'CDC_HISTORICAL_MODE') {
-                        this.mode.historical = isEnabled;
-                        if (isEnabled && lastTimestamp) {
-                            this.config.historicalModeDate = lastTimestamp.toISOString().split('T')[0];
-                        }
-                    }
+                this.mode.historical = isEnabled;
+                if (isEnabled && lastTimestamp) {
+                    this.config.historicalModeDate = lastTimestamp.toISOString().split('T')[0];
                 }
+            } else {
+                // No historical mode record found - disable historical mode
+                this.mode.historical = false;
             }
 
             logger.info('Kafka CDC mode configuration', { 
                 mode: this.mode, 
-                historicalDate: this.config.historicalModeDate 
+                historicalDate: this.config.historicalModeDate,
+                note: 'Normal mode always enabled, historical mode from database' 
             });
         } catch (error) {
-            logger.warn('CDC_PROCESSING_STATUS table not found, using default mode', { error: error.message });
-            // Use default mode when table doesn't exist
-            this.mode.normal = true;
+            logger.warn('Failed to check historical mode configuration, disabling it', { error: error.message });
+            // Normal mode continues regardless, only disable historical mode
             this.mode.historical = false;
-            logger.info('Using default CDC mode configuration', { 
+            logger.info('CDC running with normal mode only', { 
                 mode: this.mode, 
-                historicalDate: this.config.historicalModeDate 
+                reason: 'Database configuration unavailable'
             });
         }
     }
@@ -164,6 +164,9 @@ export class KafkaCDCProducerService extends EventEmitter {
         }
     }
 
+    private normalModeBacklogCount = 0;
+    private readonly MAX_BACKLOG_PROCESSING_CYCLES = 5; // Much lower limit - only 5 cycles
+
     private async processNormalMode(): Promise<void> {
         try {
             const lookbackTime = new Date();
@@ -172,9 +175,43 @@ export class KafkaCDCProducerService extends EventEmitter {
             const changes = await this.getRecentChanges(lookbackTime);
             
             if (changes.length > 0) {
+                // Check if we're processing very old data (more than 30 minutes behind)
+                const oldestChangeTime = new Date(Math.min(...changes.map(c => new Date(c.data.textTime).getTime())));
+                const currentTimeUTC = new Date();
+                const hoursBehindn = (currentTimeUTC.getTime() - oldestChangeTime.getTime()) / (1000 * 60 * 60);
+                
+                logger.debug(`Time check - Current UTC: ${currentTimeUTC.toISOString()}, Processing: ${oldestChangeTime.toISOString()}, Hours behind: ${hoursBehindn.toFixed(2)}`);
+                
+                if (hoursBehindn > 0.5) { // 30 minutes behind
+                    this.normalModeBacklogCount++;
+                    logger.warn(`CDC is ${hoursBehindn.toFixed(1)} hours behind (backlog cycle ${this.normalModeBacklogCount}/${this.MAX_BACKLOG_PROCESSING_CYCLES})`);
+                    
+                    // Fast-forward immediately if more than 2 hours behind OR after few cycles
+                    if (hoursBehindn > 2 || this.normalModeBacklogCount > this.MAX_BACKLOG_PROCESSING_CYCLES) {
+                        logger.warn(`🚀 EMERGENCY FAST-FORWARD: ${hoursBehindn.toFixed(1)} hours behind after ${this.normalModeBacklogCount} cycles. Jumping to current time!`);
+                        // Use current UTC time and subtract just 30 seconds to be very current
+                        const recentTime = new Date();
+                        recentTime.setSeconds(recentTime.getSeconds() - 30);
+                        logger.info(`📅 Current UTC time: ${new Date().toISOString()}, Setting CDC to: ${recentTime.toISOString()}`);
+                        await this.updateLastProcessedTimestamp('NORMAL', recentTime);
+                        this.normalModeBacklogCount = 0; // Reset counter
+                        logger.info(`⚡ Fast-forwarded CDC cursor to ${recentTime.toISOString()}`);
+                        return;
+                    }
+                } else {
+                    // We're caught up, reset backlog counter
+                    this.normalModeBacklogCount = 0;
+                }
+
                 logger.info(`Processing ${changes.length} changes in normal mode`);
                 await this.publishChangesToKafka(changes, 'normal');
-                await this.updateLastProcessedTimestamp('NORMAL', new Date());
+                
+                // Use the latest TEXT_TIME from processed batch to prevent infinite loops
+                const lastChange = changes[changes.length - 1];
+                const maxTextTime = new Date(Math.max(...changes.map(c => new Date(c.data.textTime).getTime())));
+                logger.info(`Updating CDC timestamp to max TEXT_TIME: ${maxTextTime.toISOString()}`);
+                
+                await this.updateLastProcessedTimestamp('NORMAL', maxTextTime);
             }
 
         } catch (error) {
@@ -183,6 +220,11 @@ export class KafkaCDCProducerService extends EventEmitter {
         }
     }
 
+    private historicalProcessingCount = 0;
+    private readonly MAX_HISTORICAL_BATCHES = 100; // Maximum batches before auto-disable
+    private readonly MAX_HISTORICAL_RUNTIME_HOURS = 2; // Maximum hours before auto-disable
+    private historicalStartTime = new Date();
+
     private async processHistoricalMode(): Promise<void> {
         try {
             if (!this.config.historicalModeDate) {
@@ -190,16 +232,51 @@ export class KafkaCDCProducerService extends EventEmitter {
                 return;
             }
 
+            // Safety check: Auto-disable if running too long
+            const runtimeHours = (Date.now() - this.historicalStartTime.getTime()) / (1000 * 60 * 60);
+            if (runtimeHours > this.MAX_HISTORICAL_RUNTIME_HOURS) {
+                logger.warn(`Historical mode auto-disabled after ${runtimeHours.toFixed(1)} hours of runtime`);
+                await this.disableHistoricalMode();
+                this.mode.historical = false;
+                return;
+            }
+
+            // Safety check: Auto-disable if processed too many batches
+            if (this.historicalProcessingCount > this.MAX_HISTORICAL_BATCHES) {
+                logger.warn(`Historical mode auto-disabled after processing ${this.historicalProcessingCount} batches`);
+                await this.disableHistoricalMode();
+                this.mode.historical = false;
+                return;
+            }
+
             const historicalDate = new Date(this.config.historicalModeDate);
+            
+            // Safety check: Don't process data more than 30 days old
+            const thirtyDaysAgo = new Date();
+            thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+            if (historicalDate < thirtyDaysAgo) {
+                logger.warn('Historical mode date too old (>30 days), disabling historical mode');
+                await this.disableHistoricalMode();
+                this.mode.historical = false;
+                return;
+            }
+
             const changes = await this.getHistoricalChanges(historicalDate);
 
             if (changes.length > 0) {
-                logger.info(`Processing ${changes.length} changes in historical mode`);
+                this.historicalProcessingCount++;
+                logger.info(`Processing ${changes.length} changes in historical mode (batch ${this.historicalProcessingCount}/${this.MAX_HISTORICAL_BATCHES})`);
                 await this.publishChangesToKafka(changes, 'historical');
                 
                 // Update the last processed timestamp for historical mode
                 const lastChange = changes[changes.length - 1];
-                await this.updateLastProcessedTimestamp('HISTORICAL', lastChange.data.textTime);
+                try {
+                    await this.updateLastProcessedTimestamp('HISTORICAL', lastChange.data.textTime);
+                } catch (error) {
+                    logger.error('Failed to update historical timestamp, disabling historical mode', { error: error.message });
+                    await this.disableHistoricalMode();
+                    this.mode.historical = false;
+                }
             } else {
                 // No more historical data, disable historical mode
                 logger.info('No more historical data to process, disabling historical mode');
@@ -209,28 +286,30 @@ export class KafkaCDCProducerService extends EventEmitter {
 
         } catch (error) {
             logger.error('Error processing historical mode CDC', { error });
+            // On any error, disable historical mode to prevent infinite loops
+            logger.warn('Disabling historical mode due to processing error');
+            this.mode.historical = false;
             throw error;
         }
     }
 
     private async getRecentChanges(sinceTime: Date): Promise<CDCChangeEvent[]> {
+        // PRODUCTION FIX: Use direct query instead of missing VERINT_CHANGE_LOG table
         const query = `
             SELECT 
-                cl.CHANGE_ID,
-                cl.CHANGE_TYPE,
-                TO_CHAR(cl.CALL_ID) as CALL_ID,
-                vta.BAN,
-                vta.SUBSCRIBER_NO,
-                vta.OWNER,
-                vta.TEXT,
-                vta.TEXT_TIME,
-                vta.CALL_TIME,
-                cl.CHANGE_TIMESTAMP
-            FROM VERINT_CHANGE_LOG cl
-            JOIN VERINT_TEXT_ANALYSIS vta ON cl.CALL_ID = vta.CALL_ID
-            WHERE cl.PROCESSED = 0
-            AND cl.CHANGE_TIMESTAMP > :sinceTime
-            ORDER BY cl.CHANGE_TIMESTAMP
+                NULL as CHANGE_ID,
+                'INSERT' as CHANGE_TYPE,
+                TO_CHAR(CALL_ID) as CALL_ID,
+                BAN,
+                SUBSCRIBER_NO,
+                OWNER,
+                TEXT,
+                TEXT_TIME,
+                CALL_TIME,
+                TEXT_TIME as CHANGE_TIMESTAMP
+            FROM VERINT_TEXT_ANALYSIS
+            WHERE TEXT_TIME > :sinceTime
+            ORDER BY TEXT_TIME
             FETCH FIRST :batchSize ROWS ONLY
         `;
 
@@ -395,19 +474,37 @@ export class KafkaCDCProducerService extends EventEmitter {
     }
 
     private async updateLastProcessedTimestamp(mode: string, timestamp: Date): Promise<void> {
-        // Use the existing CDC_PROCESSING_STATUS table instead of CDC_CONFIGURATION
-        const tableName = mode === 'NORMAL' ? 'CDC_NORMAL_MODE' : 'CDC_HISTORICAL_MODE';
-        
-        try {
-            await oracleService.executeQuery(
-                `UPDATE CDC_PROCESSING_STATUS 
-                 SET LAST_PROCESSED_TIMESTAMP = :timestamp, LAST_UPDATED = CURRENT_TIMESTAMP
-                 WHERE TABLE_NAME = :tableName`,
-                { timestamp, tableName }
-            );
-        } catch (error) {
-            // If table doesn't exist, just log and continue
-            logger.warn(`Failed to update CDC timestamp for ${mode} mode`, { error: error.message });
+        if (mode === 'NORMAL') {
+            // For normal mode, use in-memory tracking if database fails
+            try {
+                await oracleService.executeQuery(
+                    `UPDATE CDC_PROCESSING_STATUS 
+                     SET LAST_PROCESSED_TIMESTAMP = :timestamp, LAST_UPDATED = CURRENT_TIMESTAMP
+                     WHERE TABLE_NAME = 'CDC_NORMAL_MODE'`,
+                    { timestamp }
+                );
+                logger.debug(`Normal mode timestamp updated in database: ${timestamp.toISOString()}`);
+            } catch (error) {
+                // Normal mode continues with in-memory tracking - database persistence is optional
+                logger.info(`Normal mode using in-memory timestamp tracking: ${timestamp.toISOString()}`, { 
+                    reason: 'Database update failed', 
+                    error: error.message 
+                });
+            }
+        } else if (mode === 'HISTORICAL') {
+            // Historical mode requires database tracking
+            try {
+                await oracleService.executeQuery(
+                    `UPDATE CDC_PROCESSING_STATUS 
+                     SET LAST_PROCESSED_TIMESTAMP = :timestamp, LAST_UPDATED = CURRENT_TIMESTAMP
+                     WHERE TABLE_NAME = 'CDC_HISTORICAL_MODE'`,
+                    { timestamp }
+                );
+                logger.debug(`Historical mode timestamp updated: ${timestamp.toISOString()}`);
+            } catch (error) {
+                logger.error(`Failed to update historical mode timestamp - disabling historical mode`, { error: error.message });
+                this.mode.historical = false;
+            }
         }
     }
 

@@ -39,19 +39,20 @@ class InferenceCache:
         self.ttl = timedelta(seconds=ttl_seconds)
         logger.info(f"Initialized inference cache with max_size={max_size}, ttl={ttl_seconds}s")
     
-    def _get_cache_key(self, prompt: str, model: str, temperature: float, max_tokens: int) -> str:
+    def _get_cache_key(self, prompt: str, model: str, temperature: float, max_tokens: int, classifications_available: bool = False) -> str:
         """Generate cache key for request"""
         cache_data = {
             'prompt': prompt,
             'model': model,
             'temperature': temperature,
-            'max_tokens': max_tokens
+            'max_tokens': max_tokens,
+            'classifications_available': classifications_available
         }
         return hashlib.md5(json.dumps(cache_data, sort_keys=True).encode()).hexdigest()
     
-    def get(self, prompt: str, model: str, temperature: float, max_tokens: int) -> Optional[LLMResponse]:
+    def get(self, prompt: str, model: str, temperature: float, max_tokens: int, classifications_available: bool = False) -> Optional[LLMResponse]:
         """Get cached response if available and valid"""
-        key = self._get_cache_key(prompt, model, temperature, max_tokens)
+        key = self._get_cache_key(prompt, model, temperature, max_tokens, classifications_available)
         
         if key in self.cache:
             response, timestamp = self.cache[key]
@@ -65,9 +66,9 @@ class InferenceCache:
         
         return None
     
-    def set(self, prompt: str, model: str, temperature: float, max_tokens: int, response: LLMResponse):
+    def set(self, prompt: str, model: str, temperature: float, max_tokens: int, classifications_available: bool, response: LLMResponse):
         """Cache response with automatic size management"""
-        key = self._get_cache_key(prompt, model, temperature, max_tokens)
+        key = self._get_cache_key(prompt, model, temperature, max_tokens, classifications_available)
         
         # Remove oldest entries if cache is full
         if len(self.cache) >= self.max_size:
@@ -104,7 +105,7 @@ class OllamaService:
             base_url=os.getenv('OLLAMA_BASE_URL', 'http://ollama:11434'),
             model_name=os.getenv('DEFAULT_MODEL', 'dictalm-fast'),  # Use env variable
             temperature=float(os.getenv('MODEL_TEMPERATURE', '0.2')),  # Lower for faster, more focused responses
-            max_tokens=int(os.getenv('MODEL_MAX_TOKENS', '300')),  # Smaller for faster responses
+            max_tokens=int(os.getenv('MODEL_MAX_TOKENS', '800')),  # Increased for complex conversations
             timeout=int(os.getenv('REQUEST_TIMEOUT', '10'))  # Very aggressive timeout
         )
         
@@ -128,6 +129,53 @@ class OllamaService:
         self.max_concurrent = int(os.getenv('MAX_CONCURRENT_REQUESTS', '10'))
         self._semaphores = {}  # Store semaphores per event loop
         
+        # Load Hebrew call classifications
+        logger.info("🚀 OllamaService initializing - loading classifications...")
+        self.hebrew_classifications = []
+        try:
+            classifications_path = '/app/config/call-classifications.json'
+            logger.info(f"Checking classifications file at: {classifications_path}")
+            if os.path.exists(classifications_path):
+                with open(classifications_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    self.hebrew_classifications = config.get('classifications', [])
+                    logger.info(f"✅ Loaded {len(self.hebrew_classifications)} call classifications on startup")
+            else:
+                logger.warning(f"Classifications file not found at {classifications_path}")
+        except Exception as e:
+            logger.error(f"Failed to load classifications: {e}")
+            self.hebrew_classifications = []
+        
+        # Force log final state
+        logger.info(f"OllamaService initialization complete. Classifications available: {len(self.hebrew_classifications) > 0}")
+        
+        # Load prompt templates for Hebrew prompts with call ID
+        self.prompt_templates = {}
+        try:
+            templates_path = '/app/config/prompt-templates.json'
+            if os.path.exists(templates_path):
+                with open(templates_path, 'r', encoding='utf-8') as f:
+                    templates_config = json.load(f)
+                    self.prompt_templates = templates_config.get('templates', {})
+                    logger.info(f"Loaded prompt templates for Hebrew and English")
+            else:
+                logger.warning(f"Prompt templates file not found at {templates_path}")
+                # Default templates if file not found
+                self.prompt_templates = {
+                    'hebrew': {
+                        'summarize_with_id': 'סכם את שיחה מספר {callId}',
+                        'system_prompt': 'אתה עוזר AI מומחה בניתוח שיחות שירות בעברית. תמיד ציין את מספר השיחה בתשובותיך.'
+                    }
+                }
+        except Exception as e:
+            logger.error(f"Failed to load prompt templates: {e}")
+            self.prompt_templates = {
+                'hebrew': {
+                    'summarize_with_id': 'סכם את שיחה מספר {callId}',
+                    'system_prompt': 'אתה עוזר AI מומחה בניתוח שיחות שירות בעברית.'
+                }
+            }
+        
         logger.info(f"Ollama service initialized with model: {self.config.model_name}")
         logger.info(f"Hebrew model configured: {self.hebrew_model} (enabled: {self.use_dictalm_for_hebrew})")
     
@@ -146,6 +194,93 @@ class OllamaService:
             # No running event loop, create a new semaphore
             logger.warning("No running event loop found, creating standalone semaphore")
             return asyncio.Semaphore(self.max_concurrent)
+    
+    def _sanitize_hebrew_for_json(self, text: str) -> str:
+        """
+        Sanitize Hebrew text to prevent JSON parsing errors.
+        Comprehensive fix for Hebrew punctuation and JSON structure issues.
+        """
+        import re
+        import json
+        
+        # Remove control characters that definitely break JSON
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+        
+        # Try parsing first - if it works, return as-is
+        try:
+            json.loads(text)
+            return text  # Already valid JSON
+        except json.JSONDecodeError as e:
+            logger.info(f"JSON needs fixing: {e}")
+            
+            # Step 1: Fix Hebrew gershayim (double quotes) - be more comprehensive
+            hebrew_fixes = [
+                ('חו"ל', 'חו\\"ל'),
+                ('ש"ח', 'ש\\"ח'), 
+                ('ח"כ', 'ח\\"כ'),
+                ('מ"ר', 'מ\\"ר'),
+                ('ד"ר', 'ד\\"ר'),
+                ('ח"י', 'ח\\"י'),
+                ('א"ב', 'א\\"ב'),
+                ('מ"מ', 'מ\\"מ'),
+                ('ת"ד', 'ת\\"ד'),
+                # Handle any Hebrew letter + " + Hebrew letter pattern
+                (r'([א-ת])"([א-ת])', r'\1\\"\2')
+            ]
+            
+            for pattern, replacement in hebrew_fixes:
+                if len(pattern) > 10:  # It's a regex
+                    text = re.sub(pattern, replacement, text)
+                else:
+                    text = text.replace(pattern, replacement)
+            
+            # Step 2: Fix missing commas - more robust patterns
+            # Pattern 1: "field": "value"<whitespace>"nextfield"
+            text = re.sub(r'(".*?")\s*\n\s*(".*?":\s*)', r'\1,\n  \2', text)
+            
+            # Pattern 2: Handle arrays and objects - "value"]<whitespace>"nextfield"
+            text = re.sub(r'(\])\s*\n\s*(".*?":\s*)', r'\1,\n  \2', text)
+            
+            # Pattern 3: Handle after closing brace }
+            text = re.sub(r'(\})\s*\n\s*(".*?":\s*)', r'\1,\n  \2', text)
+            
+            # Step 3: Try to parse again
+            try:
+                json.loads(text)
+                logger.info("Fixed Hebrew JSON issues successfully")
+                return text
+            except json.JSONDecodeError as e2:
+                logger.warning(f"Still having JSON issues after fixes: {e2}")
+                
+                # Step 4: More aggressive fix - extract and reconstruct JSON
+                try:
+                    json_match = re.search(r'\{.*\}', text, re.DOTALL)
+                    if json_match:
+                        json_text = json_match.group(0)
+                        
+                        # Apply all fixes to extracted JSON
+                        for pattern, replacement in hebrew_fixes:
+                            if len(pattern) > 10:  # It's a regex
+                                json_text = re.sub(pattern, replacement, json_text)
+                            else:
+                                json_text = json_text.replace(pattern, replacement)
+                        
+                        # Fix structure issues
+                        json_text = re.sub(r'(".*?")\s*\n\s*(".*?":\s*)', r'\1,\n  \2', json_text)
+                        json_text = re.sub(r'(\])\s*\n\s*(".*?":\s*)', r'\1,\n  \2', json_text)
+                        json_text = re.sub(r'(\})\s*\n\s*(".*?":\s*)', r'\1,\n  \2', json_text)
+                        
+                        # Test the reconstructed JSON
+                        json.loads(json_text)
+                        logger.info("Successfully reconstructed valid JSON")
+                        return json_text
+                        
+                except json.JSONDecodeError as e3:
+                    logger.error(f"Final JSON reconstruction failed: {e3}")
+                    logger.error(f"Problematic text (first 500 chars): {text[:500]}")
+                    
+                # Step 5: Last resort - return sanitized text and let caller handle
+                return text
     
     async def health_check(self) -> bool:
         """Check if Ollama service is available."""
@@ -222,9 +357,12 @@ class OllamaService:
         # Create full prompt for caching
         full_prompt = f"{system_prompt}\n{prompt}" if system_prompt else prompt
         
-        # Check cache first
+        # Check cache first - include classification availability in cache key
         if self.cache:
-            cached_response = self.cache.get(full_prompt, model_name, temp, max_tok)
+            # Include classification availability in cache key to avoid using
+            # cached responses from before classifications were loaded
+            classifications_available = len(self.hebrew_classifications) > 0
+            cached_response = self.cache.get(full_prompt, model_name, temp, max_tok, classifications_available)
             if cached_response:
                 logger.info(f"Cache hit for prompt: {prompt[:50]}...")
                 return cached_response
@@ -242,7 +380,7 @@ class OllamaService:
                     "options": {
                         "temperature": temp,
                         "num_predict": max_tok,
-                        "num_ctx": 2048,  # Smaller context window for faster processing
+                        "num_ctx": 4096,  # Increased for complex conversations
                         "repeat_penalty": 1.1,  # Restore original
                     },
                     "stream": False
@@ -279,9 +417,10 @@ class OllamaService:
                                 }
                             )
                             
-                            # Cache the response
+                            # Cache the response with classification availability
                             if self.cache:
-                                self.cache.set(full_prompt, model_name, temp, max_tok, llm_response)
+                                classifications_available = len(self.hebrew_classifications) > 0
+                                self.cache.set(full_prompt, model_name, temp, max_tok, classifications_available, llm_response)
                             
                             return llm_response
                         elif response.status == 404 and model_name == self.hebrew_model:
@@ -369,7 +508,7 @@ class OllamaService:
                     "stream": True,
                     "options": {
                         "temperature": self.config.temperature,
-                        "num_predict": self.config.max_tokens,
+                        "num_predict": 800,
                     }
                 }
                 
@@ -405,48 +544,93 @@ class OllamaService:
     async def summarize_call(
         self,
         transcription: str,
+        call_id: str = None,
         language: str = 'hebrew',
         include_sentiment: bool = True,
-        include_products: bool = True
+        include_products: bool = True,
+        use_call_id_prompt: bool = True,
+        prompt_template: str = 'summarize_with_id'
     ) -> Dict:
-        """Generate a structured summary of a call transcription."""
+        """Generate a structured summary of a call transcription with automatic Hebrew prompt."""
         
         # Improved prompts in English for better LLM understanding
         if language.lower() in ['hebrew', 'he']:
-            system_prompt = """Analyze customer service call. Output structured JSON only. 
-IMPORTANT: The call is in Hebrew, provide all text fields in Hebrew."""
+            # Use template-based system prompt if available
+            lang_templates = self.prompt_templates.get('hebrew', {})
+            system_prompt = lang_templates.get('system_prompt', 
+                """Analyze customer service call. Output structured JSON only. 
+IMPORTANT: The call is in Hebrew, provide all text fields in Hebrew.""")
             
-            prompt = f"""Analyze this customer service call transcription:
+            # Build classifications list for prompt
+            classifications_text = ""
+            if self.hebrew_classifications:
+                classifications_text = f"\n\nAvailable classifications (choose 1-3 most relevant):\n{', '.join(self.hebrew_classifications)}"
+            
+            # Generate prompt with call ID if enabled
+            if use_call_id_prompt and call_id:
+                # Use template to generate Hebrew prompt with call ID
+                template = lang_templates.get(prompt_template, 'סכם את שיחה מספר {callId}')
+                call_prompt = template.format(callId=call_id)
+                
+                prompt = f"""{call_prompt}
 
-{transcription}
+{transcription}{classifications_text}
 
-Provide a structured analysis with the following JSON format. All text values must be in Hebrew:
+ספק ניתוח מובנה בפורמט JSON הבא. כל הערכים חייבים להיות בעברית:
 {{
-    "summary": "Brief summary of the call in Hebrew",
-    "key_points": ["First key point in Hebrew", "Second key point in Hebrew"],
-    "sentiment": "חיובי" or "שלילי" or "נייטרלי",
-    "products_mentioned": ["Product names in Hebrew if mentioned"],
-    "main_issue": "The main issue or need in Hebrew",
-    "call_type": "פנייה" or "תלונה" or "בקשה" or "מידע",
-    "action_items": ["Required actions in Hebrew"],
-    "customer_satisfaction": "גבוה" or "בינוני" or "נמוך"
+    "callId": "{call_id}",
+    "summary": "סיכום קצר של השיחה בעברית",
+    "classifications": ["הסיווג הרלוונטי ביותר מהרשימה", "סיווג נוסף אם רלוונטי"],
+    "key_points": ["נקודה מרכזית ראשונה בעברית", "נקודה מרכזית שנייה בעברית"],
+    "sentiment": "חיובי" או "שלילי" או "נייטרלי",
+    "products_mentioned": ["שמות מוצרים בעברית אם הוזכרו"],
+    "main_issue": "הבעיה או הצורך המרכזי בעברית",
+    "call_type": "פנייה" או "תלונה" או "בקשה" או "מידע",
+    "action_items": ["פעולות נדרשות בעברית"],
+    "customer_satisfaction": "גבוה" או "בינוני" או "נמוך"
 }}
 
-Respond with valid JSON only."""
+הגב עם JSON תקין בלבד. תמיד כלול את מספר השיחה ({call_id}) בתשובה."""
+            else:
+                # Original prompt without call ID
+                prompt = f"""נתח את תמליל שיחת השירות הבאה:
+
+{transcription}{classifications_text}
+
+ספק ניתוח מובנה בפורמט JSON הבא. כל הערכים חייבים להיות בעברית:
+{{
+    "summary": "סיכום קצר של השיחה בעברית",
+    "classifications": ["הסיווג הרלוונטי ביותר מהרשימה", "סיווג נוסף אם רלוונטי"],
+    "key_points": ["נקודה מרכזית ראשונה בעברית", "נקודה מרכזית שנייה בעברית"],
+    "sentiment": "חיובי" או "שלילי" או "נייטרלי",
+    "products_mentioned": ["שמות מוצרים בעברית אם הוזכרו"],
+    "main_issue": "הבעיה או הצורך המרכזי בעברית",
+    "call_type": "פנייה" או "תלונה" או "בקשה" או "מידע",
+    "action_items": ["פעולות נדרשות בעברית"],
+    "customer_satisfaction": "גבוה" או "בינוני" או "נמוך"
+}}
+
+הגב עם JSON תקין בלבד."""
         else:
             # English system prompt
             system_prompt = """Analyze customer service calls. 
 Summarize calls and extract important information.
 Always respond in structured JSON format."""
             
+            # Build classifications list for prompt (English version)
+            classifications_text = ""
+            if self.hebrew_classifications:
+                classifications_text = f"\n\nAvailable classifications:\n{', '.join(self.hebrew_classifications)}"
+            
             prompt = f"""Analyze the following customer service call transcription and provide a structured summary:
 
 Call transcription:
-{transcription}
+{transcription}{classifications_text}
 
 Please provide the analysis in the following JSON format:
 {{
     "summary": "Brief summary of the call",
+    "classifications": ["Most relevant classification from the list", "Second classification if applicable"],
     "key_points": ["Important point 1", "Important point 2"],
     "sentiment": "positive/negative/neutral",
     "products_mentioned": ["Product 1", "Product 2"],
@@ -462,39 +646,77 @@ Ensure the response is valid JSON only."""
             response = await self.generate_response(
                 prompt=prompt,
                 system_prompt=system_prompt,
-                temperature=0.3,  # Balanced for structured output
-                max_tokens=800  # Increased to prevent cutoffs
+                temperature=0.1,  # Lower for faster, more deterministic output
+                max_tokens=800  # Increased for complex conversations
             )
             
             # Try to parse JSON response
             try:
-                summary_data = json.loads(response.content)
+                # Debug: Log raw Ollama response
+                logger.info(f"Raw Ollama response length: {len(response.content)}")
+                logger.info(f"Raw Ollama response: {response.content[:2000]}")  # Increased to see more
+                
+                # Sanitize Hebrew text before JSON parsing
+                logger.info("Attempting JSON parsing...")
+                sanitized_content = self._sanitize_hebrew_for_json(response.content)
+                logger.info(f"Sanitized content: {sanitized_content[:1000]}")
+                summary_data = json.loads(sanitized_content)
+                logger.info(f"JSON parsed successfully! Keys: {list(summary_data.keys())}")
+                logger.info(f"Summary field from JSON: {summary_data.get('summary', 'NOT_FOUND')}")
+                
+                # Ensure call ID is included in response
+                if call_id and 'callId' not in summary_data:
+                    summary_data['callId'] = call_id
+                
                 return {
                     'success': True,
                     'summary': summary_data,
+                    'callId': call_id,  # Include at top level for easy access
                     'metadata': {
                         'processing_time': response.processing_time,
                         'tokens_used': response.tokens_used,
-                        'model': response.model
+                        'model': response.model,
+                        'used_call_id_prompt': use_call_id_prompt
                     }
                 }
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.warning(f"Primary JSON parsing failed: {e}")
                 # Fallback: extract JSON from response if it's embedded in text
                 import re
                 json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
                 if json_match:
-                    summary_data = json.loads(json_match.group())
-                    return {
-                        'success': True,
-                        'summary': summary_data,
-                        'metadata': {
-                            'processing_time': response.processing_time,
-                            'tokens_used': response.tokens_used,
-                            'model': response.model
+                    try:
+                        json_text = json_match.group()
+                        # Clean common JSON issues
+                        json_text = json_text.replace('\n', ' ').replace('\r', ' ')
+                        # Remove any trailing commas before closing braces/brackets
+                        json_text = re.sub(r',(\s*[}\]])', r'\1', json_text)
+                        # Fix Hebrew punctuation issues in JSON
+                        json_text = self._sanitize_hebrew_for_json(json_text)
+                        
+                        summary_data = json.loads(json_text)
+                        
+                        # Ensure call ID is included in fallback response too
+                        if call_id and 'callId' not in summary_data:
+                            summary_data['callId'] = call_id
+                        
+                        return {
+                            'success': True,
+                            'summary': summary_data,
+                            'callId': call_id,
+                            'metadata': {
+                                'processing_time': response.processing_time,
+                                'tokens_used': response.tokens_used,
+                                'model': response.model,
+                                'used_call_id_prompt': use_call_id_prompt
+                            }
                         }
-                    }
+                    except json.JSONDecodeError as e2:
+                        logger.error(f"Fallback JSON parsing also failed: {e2}")
+                        logger.error(f"Problematic JSON text: {json_text[:200]}...")
+                        raise Exception(f"Failed to parse JSON from LLM response: {e2}")
                 else:
-                    raise Exception("Failed to parse JSON from LLM response")
+                    raise Exception("No JSON found in LLM response")
                     
         except Exception as e:
             logger.error(f"Error in call summarization: {e}")
@@ -620,6 +842,25 @@ Ensure the response is valid JSON only."""
         if self.cache:
             self.cache.clear()
             logger.info("Inference cache cleared")
+    
+    def reload_classifications(self):
+        """Reload classifications from file - can be called anytime"""
+        try:
+            classifications_path = '/app/config/call-classifications.json'
+            if os.path.exists(classifications_path):
+                with open(classifications_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    old_count = len(self.hebrew_classifications)
+                    self.hebrew_classifications = config.get('classifications', [])
+                    new_count = len(self.hebrew_classifications)
+                    logger.info(f"Reloaded classifications: {old_count} -> {new_count} classifications")
+                    return True
+            else:
+                logger.warning(f"Classifications file not found at {classifications_path}")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to reload classifications: {e}")
+            return False
 
 
 # Singleton instance

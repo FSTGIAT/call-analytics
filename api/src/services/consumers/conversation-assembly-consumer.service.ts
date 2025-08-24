@@ -17,8 +17,22 @@ interface ConversationBuffer {
 export class ConversationAssemblyConsumerService extends KafkaConsumerBase {
     private conversationBuffers = new Map<string, ConversationBuffer>();
     private flushInterval: NodeJS.Timeout | null = null;
-    private readonly BUFFER_TIMEOUT = 30000; // 30 seconds
+    private readonly BUFFER_TIMEOUT = 180000; // 3 minutes - allow time for CDC batch gaps
+    private readonly MIN_MESSAGES_BEFORE_FLUSH = 5; // Require at least 5 messages before considering flush
+    private readonly CONVERSATION_COMPLETION_TIMEOUT = 300000; // 5 minutes maximum wait
     private readonly MAX_BUFFER_SIZE = 1000;
+    
+    // Infinite Loop Prevention for Conversation Assembly
+    private lastProcessedMessages = new Map<string, { changeType: string, offset: string, timestamp: Date }>();
+    private consecutiveSameMessages = new Map<string, number>();
+    private readonly MAX_CONSECUTIVE_SAME_MESSAGES = 10; // Increased threshold for batch processing
+    private readonly INFINITE_LOOP_TIME_WINDOW = 30000; // 30 seconds
+    private circuitBreakerTripped = false;
+    
+    // Auto-recovery circuit breaker settings
+    private circuitBreakerTripTime: Date | null = null;
+    private readonly AUTO_RECOVERY_TIMEOUT = 300000; // 5 minutes
+    private recoveryCheckInterval: NodeJS.Timeout | null = null;
 
     constructor() {
         super({
@@ -30,8 +44,15 @@ export class ConversationAssemblyConsumerService extends KafkaConsumerBase {
             fromBeginning: true
         });
 
+        // Auto-reset circuit breaker on startup to prevent persistent tripped state
+        logger.info('🔄 Auto-resetting circuit breaker on service restart...');
+        this.resetCircuitBreaker();
+        
         // Start periodic buffer flush
         this.startBufferFlush();
+        
+        // Start auto-recovery monitoring
+        this.startAutoRecoveryCheck();
     }
 
     protected async processMessage(
@@ -39,6 +60,33 @@ export class ConversationAssemblyConsumerService extends KafkaConsumerBase {
         context: ProcessingContext
     ): Promise<void> {
         try {
+            // Infinite Loop Detection with Auto-Recovery Check
+            if (this.circuitBreakerTripped) {
+                // Check for auto-recovery before skipping
+                this.checkAutoRecovery();
+                if (this.circuitBreakerTripped) {
+                    logger.warn('⚠️ Conversation Assembly Consumer - Circuit breaker is tripped, skipping message processing');
+                    return;
+                }
+            }
+
+            const messageKey = `${message.callId}-${message.changeType}`;
+            
+            // Check for infinite loop in message processing
+            if (this.detectInfiniteMessageLoop(messageKey, message.changeType, context.offset)) {
+                logger.error('🚨 INFINITE LOOP DETECTED in Conversation Assembly Consumer!', {
+                    callId: message.callId,
+                    changeType: message.changeType,
+                    offset: context.offset,
+                    consecutiveCount: this.consecutiveSameMessages.get(messageKey)
+                });
+
+                this.circuitBreakerTripped = true;
+                this.circuitBreakerTripTime = new Date();
+                await this.autoDisableConversationAssembly(message.callId);
+                return;
+            }
+
             logger.debug('Processing CDC change for conversation assembly', {
                 callId: message.callId,
                 changeType: message.changeType,
@@ -97,7 +145,7 @@ export class ConversationAssemblyConsumerService extends KafkaConsumerBase {
 
         // Create conversation message
         const conversationMessage: ConversationMessage = {
-            messageId: `${callId}-${data.textTime}`,
+            messageId: `${callId}-${data.changeLogId}`,
             speaker: data.owner === 'A' ? 'agent' : 'customer',
             text: data.text || '',
             timestamp: new Date(data.textTime),
@@ -130,8 +178,13 @@ export class ConversationAssemblyConsumerService extends KafkaConsumerBase {
             });
         }
 
-        // Update conversation metadata
-        conversation.lastActivity = new Date();
+        // Update conversation metadata - only update lastActivity if this is a real new message
+        // For batch processing, don't reset timer constantly
+        const timeSinceLastActivity = Date.now() - conversation.lastActivity.getTime();
+        if (timeSinceLastActivity > 500) { // Only update if 500ms since last activity
+            conversation.lastActivity = new Date();
+        }
+        
         if (conversationMessage.timestamp < conversation.startTime) {
             conversation.startTime = conversationMessage.timestamp;
         }
@@ -149,7 +202,7 @@ export class ConversationAssemblyConsumerService extends KafkaConsumerBase {
         
         if (conversation) {
             // Remove message from buffer
-            const messageId = `${callId}-${data.textTime}`;
+            const messageId = `${callId}-${data.changeLogId}`;
             const messageIndex = conversation.messages.findIndex(
                 msg => msg.messageId === messageId
             );
@@ -282,18 +335,29 @@ export class ConversationAssemblyConsumerService extends KafkaConsumerBase {
     private startBufferFlush(): void {
         this.flushInterval = setInterval(() => {
             this.flushStaleBuffers();
-        }, this.BUFFER_TIMEOUT);
+        }, 5000); // Check every 5 seconds for batch processing
     }
 
     private async flushStaleBuffers(): Promise<void> {
         const now = Date.now();
         const staleCallIds: string[] = [];
 
-        // Find stale conversations
+        // Find conversations that should be flushed using smarter criteria
         for (const [callId, conversation] of this.conversationBuffers.entries()) {
             const timeSinceLastActivity = now - conversation.lastActivity.getTime();
-            if (timeSinceLastActivity > this.BUFFER_TIMEOUT) {
+            const messageCount = conversation.messages.length;
+            
+            // More intelligent flushing criteria:
+            const shouldFlush = this.shouldFlushConversation(conversation, timeSinceLastActivity);
+            
+            if (shouldFlush) {
                 staleCallIds.push(callId);
+                logger.info('Conversation ready for flush', {
+                    callId,
+                    messageCount,
+                    timeSinceLastActivity: Math.round(timeSinceLastActivity / 1000) + 's',
+                    reason: this.getFlushReason(conversation, timeSinceLastActivity)
+                });
             }
         }
 
@@ -335,10 +399,59 @@ export class ConversationAssemblyConsumerService extends KafkaConsumerBase {
         }
     }
 
+    private shouldFlushConversation(conversation: ConversationBuffer, timeSinceLastActivity: number): boolean {
+        const messageCount = conversation.messages.length;
+        
+        // Never flush if we have very few messages (likely incomplete)
+        if (messageCount < this.MIN_MESSAGES_BEFORE_FLUSH) {
+            return false;
+        }
+        
+        // Always flush if we've hit the maximum timeout (safety valve)
+        if (timeSinceLastActivity > this.CONVERSATION_COMPLETION_TIMEOUT) {
+            return true;
+        }
+        
+        // For conversations with reasonable number of messages, use extended timeout
+        if (messageCount >= 10 && timeSinceLastActivity > this.BUFFER_TIMEOUT) {
+            return true;
+        }
+        
+        // For large conversations (50+ messages), be more patient
+        if (messageCount >= 50 && timeSinceLastActivity > (this.BUFFER_TIMEOUT * 1.5)) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    private getFlushReason(conversation: ConversationBuffer, timeSinceLastActivity: number): string {
+        const messageCount = conversation.messages.length;
+        
+        if (timeSinceLastActivity > this.CONVERSATION_COMPLETION_TIMEOUT) {
+            return 'max_timeout_reached';
+        }
+        
+        if (messageCount >= 50 && timeSinceLastActivity > (this.BUFFER_TIMEOUT * 1.5)) {
+            return 'large_conversation_timeout';
+        }
+        
+        if (messageCount >= 10 && timeSinceLastActivity > this.BUFFER_TIMEOUT) {
+            return 'normal_conversation_timeout';
+        }
+        
+        return 'insufficient_messages';
+    }
+
     async stop(): Promise<void> {
         if (this.flushInterval) {
             clearInterval(this.flushInterval);
             this.flushInterval = null;
+        }
+
+        if (this.recoveryCheckInterval) {
+            clearInterval(this.recoveryCheckInterval);
+            this.recoveryCheckInterval = null;
         }
 
         // Flush remaining buffers before stopping
@@ -361,6 +474,128 @@ export class ConversationAssemblyConsumerService extends KafkaConsumerBase {
             totalMessages += conversation.messages.length;
         }
         return totalMessages;
+    }
+
+    private detectInfiniteMessageLoop(messageKey: string, changeType: string, offset: string): boolean {
+        const lastProcessed = this.lastProcessedMessages.get(messageKey);
+        const currentMessage = { changeType, offset, timestamp: new Date() };
+        
+        // TRUE infinite loop only occurs when EXACT SAME MESSAGE (same offset) is processed repeatedly
+        if (lastProcessed && 
+            lastProcessed.changeType === currentMessage.changeType && 
+            lastProcessed.offset === currentMessage.offset) {
+            
+            // Check if this exact same message is happening within the time window
+            const timeDifference = currentMessage.timestamp.getTime() - lastProcessed.timestamp.getTime();
+            
+            if (timeDifference < this.INFINITE_LOOP_TIME_WINDOW) {
+                // TRUE infinite loop: Same callId + changeType + SAME offset within time window
+                const consecutiveCount = (this.consecutiveSameMessages.get(messageKey) || 0) + 1;
+                this.consecutiveSameMessages.set(messageKey, consecutiveCount);
+                
+                if (consecutiveCount >= this.MAX_CONSECUTIVE_SAME_MESSAGES) {
+                    logger.warn(`🚨 Detected ${consecutiveCount} consecutive ${changeType} operations for ${messageKey.split('-')[0]} with SAME offset ${offset} within ${timeDifference}ms - TRUE infinite loop`);
+                    return true;
+                }
+            } else {
+                // Same message but after long time gap - reset counter (legitimate reprocessing)
+                this.consecutiveSameMessages.set(messageKey, 1);
+            }
+        } else {
+            // Different message (different offset or changeType) - ALWAYS reset consecutive count
+            // This is normal CDC batch processing with sequential offsets
+            this.consecutiveSameMessages.set(messageKey, 1);
+        }
+        
+        this.lastProcessedMessages.set(messageKey, currentMessage);
+        return false;
+    }
+
+    private async autoDisableConversationAssembly(callId: string): Promise<void> {
+        try {
+            logger.error('🔥 AUTO-DISABLING Conversation Assembly Consumer due to infinite loop', { callId });
+            
+            // Remove the problematic conversation from buffer
+            if (this.conversationBuffers.has(callId)) {
+                this.conversationBuffers.delete(callId);
+                logger.info('🧹 Removed problematic conversation from buffer', { callId });
+            }
+            
+            // Clear processing history for this call
+            const keysToRemove = Array.from(this.lastProcessedMessages.keys()).filter(key => key.startsWith(callId));
+            keysToRemove.forEach(key => {
+                this.lastProcessedMessages.delete(key);
+                this.consecutiveSameMessages.delete(key);
+            });
+            
+            logger.error('⚠️ Conversation Assembly Consumer circuit breaker activated - manual reset required');
+            logger.error('🔧 To reset: restart the API service or clear Kafka consumer group offsets');
+            
+        } catch (error) {
+            logger.error('Failed to auto-disable conversation assembly', { error, callId });
+        }
+    }
+
+    resetCircuitBreaker(): void {
+        this.circuitBreakerTripped = false;
+        this.circuitBreakerTripTime = null;
+        this.lastProcessedMessages.clear();
+        this.consecutiveSameMessages.clear();
+        logger.info('✅ Conversation Assembly Consumer circuit breaker reset');
+    }
+
+    private startAutoRecoveryCheck(): void {
+        // Check for auto-recovery every 30 seconds
+        this.recoveryCheckInterval = setInterval(() => {
+            this.checkAutoRecovery();
+        }, 30000);
+    }
+
+    private checkAutoRecovery(): void {
+        if (!this.circuitBreakerTripped || !this.circuitBreakerTripTime) {
+            return;
+        }
+
+        const timeSinceTrip = Date.now() - this.circuitBreakerTripTime.getTime();
+        
+        // Clean up old tracking data periodically
+        this.cleanupOldTrackingData();
+        
+        if (timeSinceTrip >= this.AUTO_RECOVERY_TIMEOUT) {
+            // Check system health before auto-recovery
+            const bufferSize = this.conversationBuffers.size;
+            const recentErrors = this.consecutiveSameMessages.size;
+            
+            // More lenient auto-recovery conditions
+            if (bufferSize < 500 && recentErrors < 50) {
+                logger.info('🔄 Auto-recovering circuit breaker - system appears stable', {
+                    timeSinceTrip: Math.round(timeSinceTrip / 1000) + 's',
+                    bufferSize,
+                    recentErrors
+                });
+                this.resetCircuitBreaker();
+            } else {
+                logger.warn('⚠️ Auto-recovery delayed - system still unstable', {
+                    timeSinceTrip: Math.round(timeSinceTrip / 1000) + 's',
+                    bufferSize,
+                    recentErrors,
+                    nextCheckIn: '30s'
+                });
+            }
+        }
+    }
+
+    private cleanupOldTrackingData(): void {
+        const now = Date.now();
+        const cutoffTime = now - (this.INFINITE_LOOP_TIME_WINDOW * 2); // Clean data older than 1 minute
+        
+        // Clean up old message tracking data
+        for (const [key, data] of this.lastProcessedMessages.entries()) {
+            if (data.timestamp.getTime() < cutoffTime) {
+                this.lastProcessedMessages.delete(key);
+                this.consecutiveSameMessages.delete(key);
+            }
+        }
     }
 }
 

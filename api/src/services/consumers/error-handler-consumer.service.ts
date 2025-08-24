@@ -146,8 +146,10 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
     private async logError(failedRecord: FailedRecord): Promise<void> {
         try {
             // Log to Oracle for persistent error tracking
+            // Note: ERROR_LOG table uses RAW(16) for ERROR_ID to support SYS_GUID()
+            // Table structure is created in realtime-cdc.service.ts
             const query = `
-                INSERT INTO KAFKA_ERROR_LOG (
+                INSERT INTO ERROR_LOG (
                     ERROR_ID,
                     ORIGINAL_TOPIC,
                     ERROR_MESSAGE,
@@ -283,6 +285,13 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
                     // Reprocess OpenSearch indexing
                     await kafkaProducer.sendOpenSearchIndexRequest(failedRecord.originalMessage);
                     return true;
+
+                case 'failed-records-dlq':
+                    // PREVENT INFINITE LOOP: Don't reprocess DLQ messages back to DLQ
+                    logger.warn('Skipping reprocessing of DLQ message to prevent infinite loop', {
+                        originalTopic: failedRecord.originalTopic
+                    });
+                    return false; // Mark as permanent failure instead of reprocessing
 
                 default:
                     logger.warn('Unknown topic for reprocessing', {

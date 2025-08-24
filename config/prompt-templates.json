@@ -1,0 +1,65 @@
+{
+  "version": "1.0",
+  "lastUpdated": "2025-08-21",
+  "description": "Hebrew and English prompt templates for call analytics",
+  "templates": {
+    "hebrew": {
+      "summarize_with_id": "סכם את שיחה מספר {callId}",
+      "summarize_full": "סכם את השיחה הבאה (מספר שיחה: {callId}):\n\n{conversation}\n\nספק סיכום מפורט הכולל נקודות מפתח, סיווג השיחה, וסנטימנט כללי.",
+      "classify_call": "סווג את שיחה מספר {callId} לאחת או יותר מהקטגוריות הבאות:\n{classifications}\n\nשיחה:\n{conversation}",
+      "analyze_sentiment": "נתח את הסנטימנט של שיחה מספר {callId}. האם הלקוח מרוצה, כועס, או נייטרלי?",
+      "extract_action_items": "זהה פעולות נדרשות מהשיחה מספר {callId}:\n{conversation}\n\nרשום את כל הפעולות שהנציג התחייב לבצע.",
+      "identify_customer_needs": "זהה את הצרכים והבקשות של הלקוח בשיחה מספר {callId}",
+      "generate_followup": "צור המלצות למעקב עבור שיחה מספר {callId} בהתבסס על הסיכום הבא:\n{summary}",
+      "system_prompt": "אתה עוזר AI מומחה בניתוח שיחות שירות בעברית. תמיד ציין את מספר השיחה ({callId}) בתשובותיך. ענה בעברית בלבד."
+    },
+    "english": {
+      "summarize_with_id": "Summarize call ID {callId}",
+      "summarize_full": "Summarize the following call (Call ID: {callId}):\n\n{conversation}\n\nProvide a detailed summary including key points, call classification, and overall sentiment.",
+      "classify_call": "Classify call ID {callId} into one or more of the following categories:\n{classifications}\n\nConversation:\n{conversation}",
+      "analyze_sentiment": "Analyze the sentiment of call ID {callId}. Is the customer satisfied, angry, or neutral?",
+      "extract_action_items": "Identify required actions from call ID {callId}:\n{conversation}\n\nList all actions the agent committed to perform.",
+      "identify_customer_needs": "Identify customer needs and requests in call ID {callId}",
+      "generate_followup": "Generate follow-up recommendations for call ID {callId} based on the following summary:\n{summary}",
+      "system_prompt": "You are an AI assistant expert in analyzing customer service calls. Always reference the call ID ({callId}) in your responses."
+    },
+    "mixed": {
+      "auto_detect": "Detect language and use appropriate template",
+      "bilingual_response": "Respond in the same language as the input"
+    }
+  },
+  "placeholders": {
+    "callId": "The unique identifier for the call",
+    "conversation": "The full transcribed conversation text",
+    "classifications": "List of available classification categories",
+    "summary": "Previously generated summary text",
+    "customerInfo": "Customer account information if available",
+    "agentName": "Name of the service agent",
+    "timestamp": "Call timestamp"
+  },
+  "formatting": {
+    "hebrew": {
+      "direction": "rtl",
+      "quotes": "״",
+      "listMarker": "•"
+    },
+    "english": {
+      "direction": "ltr",
+      "quotes": "\"",
+      "listMarker": "•"
+    }
+  },
+  "response_format": {
+    "structured_json": {
+      "summary": "string",
+      "callId": "string",
+      "classifications": ["string"],
+      "sentiment": "string",
+      "keyPoints": ["string"],
+      "actionItems": ["string"],
+      "customerNeeds": ["string"],
+      "recommendedFollowup": "string",
+      "confidence": "number"
+    }
+  }
+}

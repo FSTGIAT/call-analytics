@@ -96,6 +96,7 @@ export interface MLProcessingResult extends KafkaMessage {
     callId: string;
     customerId: string;
     subscriberId: string;
+    conversationText: string; // Full original conversation text
     embedding: number[]; // 768-dimensional vector for AlephBERT
     sentiment: {
         overall: 'positive' | 'negative' | 'neutral' | 'mixed';
@@ -127,6 +128,12 @@ export interface MLProcessingResult extends KafkaMessage {
     topics?: {
         primary: string;
         secondary: string[];
+        confidence: number;
+    };
+    classifications?: {
+        primary: string;
+        secondary: string[];
+        all: string[];  // All classifications including primary
         confidence: number;
     };
     conversationContext: {
@@ -174,6 +181,12 @@ export interface OpenSearchIndexRequest extends KafkaMessage {
         summary?: string;
         entities?: Record<string, string[]>;
         topics?: string[];
+        classifications?: string[];  // Flattened list for search
+        classificationsMetadata?: {
+            primary: string;
+            secondary: string[];
+            confidence: number;
+        };
         callDate: Date;
         callStartTime: Date;
         callEndTime: Date;

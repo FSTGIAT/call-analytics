@@ -12,16 +12,25 @@ services:
     environment:
       - AUTO_MIGRATE=true
       - OPENSEARCH_URL=http://opensearch:9200
+      - OPENSEARCH_BATCH_SIZE=1         # Index immediately, don't wait for batch
+      - OPENSEARCH_BATCH_TIMEOUT=5000   # 5 second timeout instead of 30
       # UTF-8 encoding for Hebrew support
       - LC_ALL=C.UTF-8
       - LANG=C.UTF-8
       - NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+      # CDC Performance Optimization (balanced for data integrity)
+      - CDC_POLL_INTERVAL_MS=10000      # Check every 10 seconds to avoid interrupting inserts
+      - CDC_BATCH_SIZE=25               # Process 25 calls at once instead of 10
+      - CDC_MAX_CONCURRENT=10           # Process 10 calls concurrently instead of 3
+      # Re-enable Kafka CDC with fixed timestamp handling
+      - ENABLE_KAFKA_CDC=true
     ports:
       - "3000:3000"
     volumes:
       # - ./api:/app  # Commented out for production - uncomment for development
       # - /app/node_modules  # Commented out for production
       - ./logs/api:/app/logs
+      - ./config/call-classifications.json:/app/config/call-classifications.json:ro
     depends_on:
       - oracle
       - redis
@@ -58,6 +67,8 @@ services:
       - ./data/sentence-transformers:/root/.cache/torch/sentence_transformers
       - ./data/huggingface:/root/.cache/huggingface
       - ./logs/ml:/app/logs
+      - ./config/call-classifications.json:/app/config/call-classifications.json:ro
+      - ./config/prompt-templates.json:/app/config/prompt-templates.json:ro
     deploy:
       resources:
         limits:
@@ -159,7 +170,7 @@ services:
       - oracle_data:/opt/oracle/oradata
       - ./oracle/init:/docker-entrypoint-initdb.d
       - ./config/oracle/init-scripts:/opt/oracle/scripts/startup
-      - ./config/oracle/init-db.sql:/opt/oracle/scripts/setup/01-init-db.sql
+      - ./config/oracle/init-db.sql:/opt/oracle/scripts/startup/01-init-db.sql
     deploy:
       resources:
         limits:

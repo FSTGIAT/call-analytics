@@ -1,5 +1,6 @@
 import os
 import logging
+import numpy as np
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -8,11 +9,12 @@ from dotenv import load_dotenv
 # Import utilities and services
 # Removed hebrew_processor - DictaLM and AlephBERT handle Hebrew natively
 from src.services.llm_orchestrator import llm_orchestrator
+from src.services.ollama_service import ollama_service
 # from src.services.huggingface_service import huggingface_service  # Using Ollama instead
 # from src.services.bedrock_service import bedrock_service  # Removed - not using Bedrock
 from src.services.embedding_service import embedding_service
-from src.services.weaviate_service import weaviate_service
-from src.services.ml_pipeline import ml_pipeline
+# from src.services.weaviate_service import weaviate_service  # Disabled - not using Weaviate
+# from src.services.ml_pipeline import ml_pipeline  # Disabled - causes Weaviate connection attempts
 
 # Load environment variables
 load_dotenv('../config/.env.ml')
@@ -31,6 +33,26 @@ CORS(app)
 
 # Ensure UTF-8 encoding for all responses
 app.config['JSON_AS_ASCII'] = False
+
+# Initialize services on startup to ensure classifications are loaded
+logger.info("🚀 Initializing ML services on startup...")
+# Force OllamaService initialization by accessing it
+_ = ollama_service.hebrew_classifications
+logger.info(f"✅ OllamaService initialized with {len(ollama_service.hebrew_classifications)} classifications")
+
+# Pre-load embedding service to initialize CUDA on startup
+try:
+    import asyncio
+    async def init_embedding_service():
+        logger.info("🔥 Pre-loading embedding service and CUDA...")
+        # Generate a dummy embedding to initialize CUDA
+        result = await embedding_service.generate_batch_embeddings(["שלום"])
+        logger.info("✅ Embedding service and CUDA initialized successfully")
+    
+    # Run the async initialization
+    asyncio.get_event_loop().run_until_complete(init_embedding_service())
+except Exception as e:
+    logger.warning(f"⚠️ Could not pre-load embedding service: {e}")
 
 @app.before_request
 def before_request():
@@ -310,6 +332,44 @@ async def summarize_call():
     
     except Exception as e:
         logger.error(f"Call summarization error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/admin/reload-classifications', methods=['POST'])
+async def reload_classifications():
+    """Reload call classifications from JSON file."""
+    try:
+        # Reload classifications
+        success = ollama_service.reload_classifications()
+        
+        if success:
+            return jsonify({
+                'success': True,
+                'message': 'Classifications reloaded successfully',
+                'count': len(ollama_service.hebrew_classifications)
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to reload classifications'
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Error reloading classifications: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/admin/clear-cache', methods=['POST'])
+async def clear_cache():
+    """Clear the Ollama inference cache."""
+    try:
+        ollama_service.clear_cache()
+        return jsonify({
+            'success': True,
+            'message': 'Cache cleared successfully'
+        })
+    except Exception as e:
+        logger.error(f"Error clearing cache: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -745,36 +805,7 @@ async def test_hebrew_preprocessing():
         }), 500
 
 
-# ML Pipeline Endpoints
-@app.route('/pipeline/process-call', methods=['POST'])
-async def process_call():
-    """Process a single call through the complete ML pipeline."""
-    try:
-        data = request.get_json()
-        call_data = data.get('call_data')
-        customer_context = data.get('customer_context')
-        options = data.get('options')
-        
-        if not call_data:
-            return jsonify({'error': 'Call data is required'}), 400
-        
-        if not customer_context:
-            return jsonify({'error': 'Customer context is required'}), 400
-        
-        result = await ml_pipeline.process_call(call_data, customer_context, options)
-        
-        return jsonify({
-            'success': result.success,
-            'call_id': result.call_id,
-            'processing_time': result.processing_time,
-            'results': result.results,
-            'errors': result.errors
-        })
-    
-    except Exception as e:
-        logger.error(f"Pipeline call processing error: {e}")
-        return jsonify({'error': str(e)}), 500
-
+# ML Pipeline Endpoints (Old endpoints disabled - using new implementations below)
 
 @app.route('/pipeline/process-batch', methods=['POST'])
 async def process_batch():
@@ -861,6 +892,188 @@ def pipeline_stats():
     except Exception as e:
         logger.error(f"Pipeline stats error: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/analyze-conversation', methods=['POST'])
+async def analyze_conversation():
+    """Analyze conversation - endpoint expected by API consumer."""
+    try:
+        data = request.get_json()
+        text = data.get('text', '')
+        call_id = data.get('callId', '')
+        options = data.get('options', {})
+        
+        if not text:
+            return jsonify({'error': 'Text is required'}), 400
+        
+        # Use the LLM orchestrator to get summary with classifications
+        # Pass call_id and new options for prompt generation
+        result = await llm_orchestrator.summarize_call(
+            transcription=text,
+            call_id=call_id,  # Pass call ID for Hebrew prompt generation
+            language='hebrew' if any(ord(c) >= 0x0590 and ord(c) <= 0x05FF for c in text) else 'english',
+            prefer_local=True,
+            use_call_id_prompt=options.get('useCallIdPrompt', True),  # Enable by default
+            prompt_template=options.get('promptTemplate', 'summarize_with_id')
+        )
+        
+        # Generate embedding if requested
+        embedding = None
+        if options.get('includeEmbedding', False):
+            embedding_result = await embedding_service.generate_batch_embeddings([text])
+            if embedding_result and len(embedding_result) > 0:
+                # Get the embedding from the EmbeddingResult object
+                embedding_obj = embedding_result[0]
+                if hasattr(embedding_obj, 'embedding'):
+                    embedding_array = embedding_obj.embedding
+                    if isinstance(embedding_array, np.ndarray):
+                        embedding = embedding_array.tolist()
+                    else:
+                        embedding = list(embedding_array)
+        
+        # Extract summary data correctly - the LLM orchestrator returns data nested under 'summary'
+        summary_data = result.get('summary', {})
+        
+        # Debug logging
+        logger.info(f"ML result keys: {list(result.keys())}")
+        logger.info(f"Summary data: {summary_data}")
+        logger.info(f"Summary text: {summary_data.get('summary', 'EMPTY')}")
+        logger.info(f"Classifications: {summary_data.get('classifications', [])}")
+        logger.info(f"Key points: {summary_data.get('key_points', [])}")
+        
+        # Format response to match what the API consumer expects
+        response = {
+            'callId': call_id,
+            'embedding': embedding,
+            'sentiment': {
+                'overall': summary_data.get('sentiment', 'neutral'),
+                'score': 0.8,  # Default score
+                'distribution': {
+                    'positive': 0.33,
+                    'negative': 0.33,
+                    'neutral': 0.34
+                }
+            },
+            'language': {
+                'detected': 'hebrew' if any(ord(c) >= 0x0590 and ord(c) <= 0x05FF for c in text) else 'english',
+                'confidence': 0.95,
+                'isHebrew': any(ord(c) >= 0x0590 and ord(c) <= 0x05FF for c in text)
+            },
+            'summary': summary_data.get('summary', ''),
+            'classifications': summary_data.get('classifications', []),
+            'keyPoints': summary_data.get('key_points', []),
+            'actionItems': summary_data.get('action_items', []),
+            'entities': [],  # Could be populated later
+            'topics': [],   # Could be populated later
+            'success': True,
+            'processingTime': result.get('metadata', {}).get('processing_time', 0)
+        }
+        
+        return jsonify(response)
+    
+    except Exception as e:
+        logger.error(f"Conversation analysis error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/pipeline/process-call', methods=['POST'])
+async def process_call_pipeline():
+    """Process call pipeline endpoint - matches API service expectations."""
+    try:
+        logger.info("Pipeline process-call endpoint called")
+        data = request.get_json()
+        logger.info(f"Received data: {data}")
+        
+        if data is None:
+            logger.error("No JSON data received")
+            return jsonify({'error': 'No JSON data provided'}), 400
+            
+        call_data = data.get('call_data', {})
+        customer_context = data.get('customer_context', {})
+        options = data.get('options', {})
+        
+        logger.info(f"Parsed - call_data keys: {list(call_data.keys()) if call_data else 'None'}")
+        logger.info(f"Parsed - customer_context: {customer_context}")
+        logger.info(f"Parsed - options: {options}")
+        
+        # Extract call information
+        call_id = call_data.get('callId', '')
+        transcription_text = call_data.get('transcriptionText', '')
+        
+        if not transcription_text:
+            return jsonify({
+                'success': False,
+                'callId': call_id,
+                'processingTime': 0,
+                'results': {},
+                'errors': ['No transcription text provided']
+            }), 400
+        
+        # Use the same simple logic as analyze_conversation - avoid ML pipeline
+        result = await llm_orchestrator.summarize_call(
+            transcription=transcription_text,
+            language='hebrew' if any(ord(c) >= 0x0590 and ord(c) <= 0x05FF for c in transcription_text) else 'english',
+            prefer_local=True
+        )
+        
+        # Generate embedding if requested (handle multiple option formats)
+        embedding = None
+        should_generate_embedding = (
+            options.get('enableEmbeddings', False) or 
+            options.get('generate_embeddings', False)
+        )
+        
+        if should_generate_embedding:
+            embedding_result = await embedding_service.generate_batch_embeddings([transcription_text])
+            if embedding_result and len(embedding_result) > 0:
+                embedding_obj = embedding_result[0]
+                if hasattr(embedding_obj, 'embedding'):
+                    embedding_array = embedding_obj.embedding
+                    if isinstance(embedding_array, np.ndarray):
+                        embedding = embedding_array.tolist()
+                    else:
+                        embedding = list(embedding_array)
+        
+        # Debug: log the result structure
+        logger.info(f"LLM result structure: {result}")
+        
+        # Format response to match MLProcessingResult interface
+        response = {
+            'success': True,
+            'callId': call_id,
+            'processingTime': result.get('metadata', {}).get('processing_time', 0),
+            'results': {
+                'preprocessing': {
+                    'language': 'hebrew' if any(ord(c) >= 0x0590 and ord(c) <= 0x05FF for c in transcription_text) else 'english',
+                    'textLength': len(transcription_text)
+                },
+                'embedding': embedding,
+                'llmAnalysis': {
+                    'summary': result.get('summary', {}).get('summary', ''),
+                    'classifications': result.get('summary', {}).get('classifications', []),
+                    'sentiment': result.get('summary', {}).get('sentiment', 'neutral'),
+                    'keyPoints': result.get('summary', {}).get('key_points', []),
+                    'actionItems': result.get('summary', {}).get('action_items', [])
+                },
+                'vectorStorage': None,  # Will be handled by downstream services
+                'productAnalysis': {
+                    'productsDetected': result.get('summary', {}).get('products_mentioned', [])
+                }
+            },
+            'errors': []
+        }
+        
+        return jsonify(response)
+    
+    except Exception as e:
+        logger.error(f"Pipeline processing error: {e}")
+        return jsonify({
+            'success': False,
+            'callId': call_data.get('callId', 'unknown') if 'call_data' in locals() else 'unknown',
+            'processingTime': 0,
+            'results': {},
+            'errors': [str(e)]
+        }), 500
 
 
 @app.route('/test/pipeline', methods=['GET'])

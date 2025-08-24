@@ -45,47 +45,196 @@ export class AIController {
           preferences: user.preferences || {}
         };
 
-        // Extract specific customer ID from query if mentioned (for admin users)
+        // Detect query type for optimization
+        const isSummaryRequest = /סכם|סיכום|תקציר|summarize|summary|מה קרה/i.test(message);
+        const isDetailedRequest = /פרטים|תוכן מלא|מה אמר|מה נאמר|full|detailed|complete|תמליל/i.test(message);
+        const isAnalysisRequest = /נתח|analyze|analysis|בעיה|פתרון|למה|מדוע/i.test(message);
+        
+        logger.info('Query type detection', {
+          isSummaryRequest,
+          isDetailedRequest,
+          isAnalysisRequest,
+          message: message.substring(0, 100)
+        });
+        
+        // Extract specific customer ID or call ID from query (for admin users)
+        let searchByCallId = null;
+        
         if (user.role === 'admin') {
-          // Try CUSTOMER_XXXX format first
-          const customerIdMatch = message.match(/CUSTOMER[_\-\s]*([A-Z0-9_\-]+)/i);
-          // Try BAN format (for Verint data)
-          const banMatch = message.match(/BAN\s*(\d+)/i);
-          // Try bare customer numbers (like "לקוח 3867088", "customer 3867088", or just numbers in Hebrew context)
-          const bareNumberMatch = message.match(/לקוח\s*(\d+)|customer\s*(\d+)|\b(\d{7,})\b/i);
+          // PRIORITY 1: Check for call ID patterns first - debug logging
+          logger.info('Checking for call ID patterns', {
+            message: message.substring(0, 100),
+            containsShicha: message.includes('שיחה'),
+            containsMispar: message.includes('מספר')
+          });
           
-          if (customerIdMatch) {
-            const extractedCustomerId = customerIdMatch[1]; // Use direct number for production
-            customerContext = {
-              ...customerContext,
-              customerId: extractedCustomerId
-            };
-            logger.info('Extracted customer ID from query', {
+          const callIdMatch = message.match(/שיחה\s*מספר\s*(\d+)|call\s*(?:id|number)\s*(\d+)|callid[:\s]*(\d+)/i);
+          
+          if (callIdMatch) {
+            searchByCallId = callIdMatch[1] || callIdMatch[2] || callIdMatch[3];
+            logger.info('✅ Extracted call ID from query', {
               originalQuery: message.substring(0, 50),
-              extractedCustomerId
+              extractedCallId: searchByCallId,
+              matchedPattern: callIdMatch[0]
             });
-          } else if (banMatch) {
-            const extractedBan = banMatch[1];
-            // Use BAN directly as customer ID
-            customerContext = {
-              ...customerContext,
-              customerId: extractedBan
-            };
-            logger.info('Extracted BAN from query', {
-              originalQuery: message.substring(0, 50),
-              extractedBan
+          } else {
+            logger.info('❌ No call ID pattern matched, checking customer patterns');
+            // PRIORITY 2: Check for customer ID patterns (only if not a call ID query)
+            // Exclude call ID context with negative lookahead
+            const customerIdMatch = message.match(/CUSTOMER[_\-\s]*([A-Z0-9_\-]+)/i);
+            const banMatch = message.match(/BAN\s*(\d+)/i);
+            // More specific customer patterns that exclude call ID context
+            const bareNumberMatch = message.match(/לקוח\s*(\d+)|customer\s*(\d+)/i);
+            // For generic numbers, only match if NOT in call ID context
+            const genericNumberMatch = message.match(/\b(\d{7,})\b/i);
+            const isCallContext = message.match(/שיחה|call/i);
+            
+            logger.info('Pattern matching debug', {
+              hasGenericNumber: !!genericNumberMatch,
+              isCallContext: !!isCallContext,
+              willSkipGeneric: isCallContext && genericNumberMatch
             });
-          } else if (bareNumberMatch) {
-            const extractedNumber = bareNumberMatch[1] || bareNumberMatch[2] || bareNumberMatch[3];
-            // Use number directly as customer ID for production BAN format
-            customerContext = {
-              ...customerContext,
-              customerId: extractedNumber
-            };
-            logger.info('Extracted customer number from query', {
-              originalQuery: message.substring(0, 50),
-              extractedNumber,
-              matchedPattern: bareNumberMatch[0]
+            
+            if (customerIdMatch) {
+              const extractedCustomerId = customerIdMatch[1];
+              customerContext = {
+                ...customerContext,
+                customerId: extractedCustomerId
+              };
+              logger.info('Extracted customer ID from query', {
+                originalQuery: message.substring(0, 50),
+                extractedCustomerId
+              });
+            } else if (banMatch) {
+              const extractedBan = banMatch[1];
+              customerContext = {
+                ...customerContext,
+                customerId: extractedBan
+              };
+              logger.info('Extracted BAN from query', {
+                originalQuery: message.substring(0, 50),
+                extractedBan
+              });
+            } else if (bareNumberMatch) {
+              const extractedNumber = bareNumberMatch[1] || bareNumberMatch[2];
+              customerContext = {
+                ...customerContext,
+                customerId: extractedNumber
+              };
+              logger.info('Extracted customer number from query', {
+                originalQuery: message.substring(0, 50),
+                extractedNumber,
+                matchedPattern: bareNumberMatch[0]
+              });
+            } else if (genericNumberMatch && !isCallContext) {
+              const extractedNumber = genericNumberMatch[1];
+              customerContext = {
+                ...customerContext,
+                customerId: extractedNumber
+              };
+              logger.info('Extracted generic number as customer ID', {
+                originalQuery: message.substring(0, 50),
+                extractedNumber,
+                matchedPattern: genericNumberMatch[0]
+              });
+            } else if (genericNumberMatch && isCallContext) {
+              logger.info('⚠️ Skipping generic number match due to call context', {
+                originalQuery: message.substring(0, 50),
+                foundNumber: genericNumberMatch[1],
+                callContext: 'שיחה pattern detected'
+              });
+            }
+          }
+        }
+
+        // CRITICAL FIX: Validate data exists before processing
+        if (searchByCallId) {
+          // For call ID searches, validate the call exists across all customers
+          const { openSearchService } = await import('../services/opensearch.service');
+          
+          try {
+            // Search for call ID across all customer indices
+            const callValidation = await openSearchService.validateCallIdExists(searchByCallId);
+            
+            if (!callValidation.exists) {
+              logger.info('Call ID has no data - preventing AI hallucination', {
+                callId: searchByCallId,
+                query: message.substring(0, 50)
+              });
+              
+              res.json({
+                success: true,
+                response: `שיחה מספר ${searchByCallId} לא נמצאת במערכת או שאין לה נתוני שיחה זמינים.`,
+                conversationId: conversationId || `${user.userId}-chat-${Date.now()}`,
+                timestamp: new Date().toISOString(),
+                metadata: {
+                  processingTime: `${Date.now() - startTime}ms`,
+                  confidence: 1.0,
+                  dataValidation: {
+                    callExists: false,
+                    conversationCount: 0
+                  },
+                  suggestedActions: [
+                    'Check Call ID',
+                    'View Recent Calls',
+                    'Search All Data'
+                  ]
+                }
+              });
+              return;
+            } else {
+              logger.info('Call ID validation passed', {
+                callId: searchByCallId,
+                customerId: callValidation.customerId,
+                conversationCount: callValidation.count
+              });
+              
+              // Set customer context from the found call
+              customerContext = {
+                ...customerContext,
+                customerId: callValidation.customerId
+              };
+            }
+          } catch (error) {
+            logger.error('Call ID validation failed:', error);
+            // Continue without validation for fallback search
+          }
+        } else if (customerContext.customerId) {
+          // For customer ID searches, validate customer data exists  
+          const { openSearchService } = await import('../services/opensearch.service');
+          const validation = await openSearchService.validateCustomerDataExists(customerContext.customerId);
+          
+          if (!validation.exists) {
+            logger.info('Customer has no data - preventing AI hallucination', {
+              customerId: customerContext.customerId,
+              query: message.substring(0, 50)
+            });
+            
+            // Return immediate response for non-existent customer data
+            res.json({
+              success: true,
+              response: `לקוח ${customerContext.customerId} לא נמצא במערכת או שאין לו נתוני שיחות זמינים.`,
+              conversationId: conversationId || `${user.userId}-chat-${Date.now()}`,
+              timestamp: new Date().toISOString(),
+              metadata: {
+                processingTime: `${Date.now() - startTime}ms`,
+                confidence: 1.0,
+                dataValidation: {
+                  customerExists: false,
+                  conversationCount: 0
+                },
+                suggestedActions: [
+                  'Check Customer ID',
+                  'View Available Customers',
+                  'Search All Data'
+                ]
+              }
+            });
+            return;
+          } else {
+            logger.info('Customer data validation passed', {
+              customerId: customerContext.customerId,
+              conversationCount: validation.count
             });
           }
         }
@@ -120,23 +269,88 @@ export class AIController {
           // SIMPLIFIED: Direct OpenSearch only - no hybrid complexity
           logger.info('Starting OpenSearch for direct data access');
           
-          // Prepare OpenSearch query
-          const opensearchQuery = searchContext.customerId ? {
-            query: '*', // Get all conversations for this customer
-            size: contextLimit, 
-            sort: [{ callDate: 'desc' as const }] // Most recent first
-          } : {
-            query: message, // For general queries, search by message content
-            size: contextLimit, 
-            minimum_should_match: '60%'
-          };
+          // Prepare OpenSearch query based on search type
+          let opensearchQuery;
           
-          // Direct OpenSearch call - no hybrid merging
-          const searchResponse = await openSearchService.search(
-            searchContext, 
-            'transcriptions', 
-            opensearchQuery
-          );
+          if (searchByCallId) {
+            // Search specifically by call ID across all customers
+            opensearchQuery = {
+              query: {
+                bool: {
+                  must: [
+                    { term: { 'callId.keyword': searchByCallId } }
+                  ]
+                }
+              },
+              size: contextLimit,
+              sort: [{ indexedAt: 'desc' as const }]
+            };
+          } else if (searchContext.customerId) {
+            // Search all conversations for specific customer
+            opensearchQuery = {
+              query: '*',
+              size: contextLimit, 
+              sort: [{ indexedAt: 'desc' as const }]
+            };
+          } else {
+            // General query search by message content
+            opensearchQuery = {
+              query: message,
+              size: contextLimit, 
+              minimum_should_match: '60%'
+            };
+          }
+          
+          // Direct OpenSearch call - handle call ID search differently
+          let searchResponse;
+          
+          if (searchByCallId) {
+            // For call ID searches, search across all customer indices
+            searchResponse = await openSearchService.searchByCallId(searchByCallId);
+            
+            // OPTIMIZATION: Direct summary return for simple summary requests
+            if (isSummaryRequest && searchResponse.results.length > 0) {
+              const result = searchResponse.results[0];
+              if (result.summary?.text) {
+                logger.info('Direct summary return - bypassing LLM', {
+                  callId: searchByCallId,
+                  summaryLength: result.summary.text.length,
+                  tokensUsed: 0,
+                  source: 'stored_summary'
+                });
+                
+                // Format classifications for display
+                const classificationsText = result.classifications?.all?.join(', ') || 
+                                          result.classifications?.primary || 
+                                          'לא זמין';
+                const sentimentText = typeof result.sentiment === 'string' 
+                  ? result.sentiment 
+                  : (result.sentiment?.overall || 'לא זמין');
+                
+                res.json({
+                  success: true,
+                  response: `סיכום שיחה ${searchByCallId}:\n\n${result.summary.text}\n\n📊 סיווגים: ${classificationsText}\n😊 סנטימנט: ${sentimentText}`,
+                  conversationId: conversationId || `${user.userId}-chat-${Date.now()}`,
+                  timestamp: new Date().toISOString(),
+                  metadata: {
+                    processingTime: `${Date.now() - startTime}ms`,
+                    source: 'stored_summary',
+                    tokensUsed: 0,
+                    confidence: 1.0,
+                    optimization: 'direct_retrieval'
+                  }
+                });
+                return;
+              }
+            }
+          } else {
+            // Regular customer-based search
+            searchResponse = await openSearchService.search(
+              searchContext, 
+              'transcriptions', 
+              opensearchQuery
+            );
+          }
           
           searchResults = searchResponse.results || [];
           
@@ -149,8 +363,10 @@ export class AIController {
               customerId: searchResults[0].customerId,
               transcriptionTextLength: searchResults[0].transcriptionText?.length,
               transcriptionPreview: searchResults[0].transcriptionText?.substring(0, 300),
-              sentiment: searchResults[0].sentiment,
-              callDate: searchResults[0].callDate
+              sentiment: typeof searchResults[0].sentiment === 'string' 
+                ? searchResults[0].sentiment 
+                : (searchResults[0].sentiment?.overall || 'neutral'),
+              callDate: searchResults[0].callDate || searchResults[0].indexedAt
             } : null,
             allCallIds: searchResults.map(r => r.callId).slice(0, 10),
             uniqueCustomers: [...new Set(searchResults.map(r => r.customerId))],
@@ -185,7 +401,7 @@ export class AIController {
               total_calls: { cardinality: { field: 'callId' } },
               sentiment_breakdown: {
                 terms: { 
-                  field: 'sentiment', 
+                  field: 'sentiment.overall', 
                   size: 5 
                 },
                 aggs: {
@@ -337,14 +553,16 @@ export class AIController {
           logger.info('DEDUPLICATION - Selecting longest conversations', {
             originalResults: searchResults.length,
             deduplicatedResults: deduplicatedResults.length,
-            longestConversationLength: Math.max(...deduplicatedResults.map(r => (r.transcriptionText || '').length))
+            longestConversationLength: Math.max(...deduplicatedResults.map(r => (r.transcriptionText || r.conversationText || '').length))
           });
 
           // Step 1: Score results by importance
           const scoredResults = deduplicatedResults.map(result => {
-            const sentiment = result.sentiment || 'neutral';
-            const callDate = new Date(result.callDate || 0);
-            const transcript = result.transcriptionText || '';
+            const sentiment = typeof result.sentiment === 'string' 
+              ? result.sentiment 
+              : (result.sentiment?.overall || 'neutral');
+            const callDate = new Date(result.callDate || result.indexedAt || 0);
+            const transcript = result.transcriptionText || result.conversationText || '';
             
             // Content importance scoring
             let score = result.score || 0; // Search relevance base score
@@ -381,9 +599,14 @@ export class AIController {
           });
           
           for (const result of scoredResults) {
-            const sentiment = result.sentiment || 'neu';
-            const callDate = result.callDate?.split('T')[0] || 'unknown';
-            const fullTranscript = result.transcriptionText || result.transcript || result.text || result.content || '';
+            const sentiment = typeof result.sentiment === 'string' 
+              ? result.sentiment 
+              : (result.sentiment?.overall || 'neu');
+            const callDate = (result.callDate || result.indexedAt)?.split('T')[0] || 'unknown';
+            const fullTranscript = result.transcriptionText || result.conversationText || result.transcript || result.text || result.content || '';
+            const classifications = Array.isArray(result.classifications) 
+              ? result.classifications.join(', ') 
+              : (result.classifications?.all?.join(', ') || result.classifications?.primary || '');
             
             // ENHANCED LOGGING: Track each result processing
             logger.info(`CONTEXT BUILDING - Processing result #${selectedResults.length + 1}`, {
@@ -404,41 +627,72 @@ export class AIController {
               customerIdUsed: searchContext.customerId
             });
             
-            // Skip empty entries
-            if (!fullTranscript || fullTranscript.length < 10) {
-              logger.warn('CONTEXT BUILDING - Skipping empty transcript', {
+            // OPTIMIZATION: Smart content selection based on query type and available data
+            const storedSummary = result.summary?.text;
+            const hasStoredSummary = !!storedSummary;
+            
+            // Skip empty entries (but check stored summary first)
+            if (!hasStoredSummary && (!fullTranscript || fullTranscript.length < 10)) {
+              logger.warn('CONTEXT BUILDING - Skipping empty content', {
                 callId: result.callId,
-                transcriptLength: fullTranscript.length
+                transcriptLength: fullTranscript.length,
+                hasStoredSummary
               });
               continue;
             }
             
-            // For customer-specific queries OR when we extracted a customer ID from the query, show full transcript
+            // For customer-specific queries OR when we extracted a customer ID from the query
             const hasSpecificCustomer = searchContext.customerId || 
                                        /לקוח\s*(\d+)|customer\s*(\d+)|\b(\d{7,})\b/i.test(message);
             
-            const summary = hasSpecificCustomer ? 
-              fullTranscript : // Show full transcript for specific customer queries
-              (fullTranscript.length > 100 ? 
-                fullTranscript.substring(0, 100) + '...' : 
-                fullTranscript);
+            // SMART CONTENT SELECTION - Optimize token usage
+            let contentToUse = '';
+            let contentSource = '';
             
-            // CRITICAL DEBUG: Log summary decision
-            logger.info(`CONTEXT BUILDING - Summary decision`, {
+            if (isSummaryRequest && hasStoredSummary) {
+              // Use pre-saved summary for summary requests (95% token reduction)
+              contentToUse = storedSummary;
+              contentSource = 'stored_summary';
+              logger.info('TOKEN OPTIMIZATION - Using stored summary', {
+                callId: result.callId,
+                summaryLength: storedSummary.length,
+                transcriptLength: fullTranscript.length,
+                tokensSaved: fullTranscript.length - storedSummary.length,
+                savingsPercent: ((1 - storedSummary.length / Math.max(fullTranscript.length, 1)) * 100).toFixed(1)
+              });
+            } else if (isDetailedRequest || isAnalysisRequest || !hasStoredSummary) {
+              // Use full transcript for detailed analysis or when no summary exists
+              contentToUse = fullTranscript;
+              contentSource = 'full_transcript';
+            } else if (hasSpecificCustomer && !isSummaryRequest) {
+              // For specific customer queries that aren't summary requests, prefer full data
+              contentToUse = hasStoredSummary ? storedSummary : fullTranscript;
+              contentSource = hasStoredSummary ? 'stored_summary' : 'full_transcript';
+            } else {
+              // General queries: use summary if available, otherwise truncate
+              contentToUse = storedSummary || (fullTranscript.length > 100 ? 
+                fullTranscript.substring(0, 100) + '...' : fullTranscript);
+              contentSource = storedSummary ? 'stored_summary' : 'truncated_transcript';
+            }
+            
+            // Log content selection decision
+            logger.info(`CONTEXT BUILDING - Content selection`, {
               callId: result.callId,
-              searchContextCustomerId: searchContext.customerId,
+              queryType: isSummaryRequest ? 'summary' : isDetailedRequest ? 'detailed' : 'general',
+              contentSource,
+              hasStoredSummary,
               hasSpecificCustomer,
-              messageContainsCustomerPattern: /לקוח\s*(\d+)|customer\s*(\d+)|\b(\d{7,})\b/i.test(message),
-              willUseFullTranscript: hasSpecificCustomer,
-              fullTranscriptLength: fullTranscript.length,
-              summaryLength: summary.length,
-              summaryEqualsFullTranscript: summary === fullTranscript,
-              summaryPreview: summary.substring(0, 300)
+              originalTokens: fullTranscript.length,
+              optimizedTokens: contentToUse.length,
+              tokensSaved: fullTranscript.length - contentToUse.length,
+              savingsPercent: fullTranscript.length > 0 ? 
+                ((1 - contentToUse.length / fullTranscript.length) * 100).toFixed(1) : '0',
+              contentPreview: contentToUse.substring(0, 300)
             });
             
             const resultText = user.role === 'admin' && result.customerId
-              ? `Date: ${callDate}, Customer: ${result.customerId}, Call: ${result.callId}, Sentiment: ${sentiment}, Content: ${summary}\n`
-              : `Date: ${callDate}, Call: ${result.callId}, Sentiment: ${sentiment}, Content: ${summary}\n`;
+              ? `Date: ${callDate}, Customer: ${result.customerId}, Call: ${result.callId}, Sentiment: ${sentiment}${classifications ? `, Classifications: ${classifications}` : ''}, Content[${contentSource}]: ${contentToUse}\n`
+              : `Date: ${callDate}, Call: ${result.callId}, Sentiment: ${sentiment}${classifications ? `, Classifications: ${classifications}` : ''}, Content[${contentSource}]: ${contentToUse}\n`;
             const resultSize = Buffer.byteLength(resultText, 'utf8');
             
             // ENHANCED LOGGING: Track what gets included in context
@@ -446,8 +700,8 @@ export class AIController {
               callId: result.callId,
               resultTextLength: resultText.length,
               resultText: resultText.substring(0, 500),
-              isFullTranscript: summary === fullTranscript,
-              summaryLength: summary.length,
+              isFullTranscript: contentToUse === fullTranscript,
+              contentLength: contentToUse.length,
               contextSizeSoFar: contextSize,
               willFitInBudget: contextSize + resultSize <= maxContextBytes,
               maxContextBytes
@@ -492,7 +746,9 @@ export class AIController {
             };
             
             searchResults.forEach(result => {
-              const sentiment = result.properties.sentiment || 'neutral';
+              const sentiment = typeof result.properties?.sentiment === 'string' 
+                ? result.properties.sentiment 
+                : (result.properties?.sentiment?.overall || 'neutral');
               if (sentiment in analyticsToUse.sentimentBreakdown) {
                 analyticsToUse.sentimentBreakdown[sentiment]++;
               }
@@ -617,7 +873,8 @@ ${scopeInstruction}
 Available Data:
 ${user.role === 'admin' ? 'Customer Activity: Customer call counts and activity\nTotal Customers: System-wide customer metrics' : ''}
 Analytics: Sentiment analysis results
-Call Records: Individual call transcriptions and metadata`;
+Call Records: Individual call transcriptions and metadata
+Classifications: Call type categories (e.g., תקלת גלישה, רכישת חבילת חו״ל, הסבר חשבונית)`;
 
         logger.info('Enhanced prompt being sent to LLM:', {
           message: message.substring(0, 100),

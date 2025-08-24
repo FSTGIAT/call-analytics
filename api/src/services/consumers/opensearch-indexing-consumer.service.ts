@@ -52,6 +52,12 @@ interface OpenSearchIndexDocument {
         secondary: string[];
         confidence: number;
     };
+    classifications?: {
+        primary: string;
+        secondary: string[];
+        all: string[];
+        confidence: number;
+    };
     conversationMetadata: {
         messageCount: number;
         duration: number;
@@ -101,13 +107,16 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
         context: ProcessingContext
     ): Promise<void> {
         try {
-            logger.info('Processing ML result for OpenSearch indexing', {
+            logger.info('🔍 OpenSearch Consumer: Processing ML result', {
                 callId: message.callId,
                 customerId: message.customerId,
-                language: message.language.detected,
-                sentiment: message.sentiment.overall,
+                language: message.language?.detected || 'unknown',
+                sentiment: message.sentiment?.overall || 'unknown',
                 partition: context.partition,
-                offset: context.offset
+                offset: context.offset,
+                messageType: typeof message,
+                hasEmbedding: !!message.embedding,
+                hasSummary: !!message.summary
             });
 
             // Create OpenSearch document
@@ -130,8 +139,9 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
             });
 
         } catch (error) {
-            logger.error('Failed to process ML result for OpenSearch indexing', {
-                error,
+            logger.error('❌ OpenSearch Consumer: Failed to process ML result', {
+                error: error.message,
+                stack: error.stack,
                 callId: message.callId,
                 customerId: message.customerId,
                 partition: context.partition,
@@ -142,8 +152,8 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
     }
 
     private async createIndexDocument(mlResult: MLProcessingResult): Promise<OpenSearchIndexDocument> {
-        // Generate conversation text from context
-        const conversationText = this.generateConversationText(mlResult);
+        // Use the full original conversation text instead of summary
+        const conversationText = mlResult.conversationText || this.generateConversationText(mlResult);
 
         // Create the document structure
         const document: OpenSearchIndexDocument = {
@@ -178,6 +188,7 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
                 secondary: [],
                 confidence: 0.5
             },
+            classifications: mlResult.classifications,
             conversationMetadata: {
                 messageCount: mlResult.conversationContext.messageCount,
                 duration: mlResult.conversationContext.duration,
@@ -333,6 +344,13 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
                 // Document data
                 bulkOperations.push(doc);
             }
+
+            // Log the bulk operations for debugging
+            logger.debug('Bulk operations being sent to OpenSearch', {
+                operationCount: bulkOperations.length,
+                firstOperation: bulkOperations[0],
+                firstDocument: bulkOperations[1]
+            });
 
             // Execute bulk indexing
             await openSearchService.bulkIndex(bulkOperations);

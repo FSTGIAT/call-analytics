@@ -223,7 +223,7 @@ export class OpenSearchService {
           query,
           size: searchQuery.size || 20,
           from: searchQuery.from || 0,
-          sort: searchQuery.sort || [{ callDate: { order: 'desc' as const } }],
+          sort: searchQuery.sort || [{ indexedAt: { order: 'desc' as const } }],
           ...(searchQuery.aggs && { aggs: searchQuery.aggs }),
           highlight: {
             fields: {
@@ -299,7 +299,7 @@ export class OpenSearchService {
           query,
           size: searchQuery.size || 20,
           from: searchQuery.from || 0,
-          sort: searchQuery.sort || [{ callDate: { order: 'desc' as const } }],
+          sort: searchQuery.sort || [{ indexedAt: { order: 'desc' as const } }],
           aggs
         }
       };
@@ -511,7 +511,7 @@ export class OpenSearchService {
               must: mustClauses
             }
           },
-          sort: searchQuery.sort || [{ '_score': { order: 'desc' as const } }, { 'callDate': { order: 'desc' as const } }]
+          sort: searchQuery.sort || [{ '_score': { order: 'desc' as const } }, { 'indexedAt': { order: 'desc' as const } }]
         }
       };
 
@@ -945,7 +945,16 @@ export class OpenSearchService {
       
       try {
         const response = await this.client.bulk({
-          body: operations
+          body: operations,
+          refresh: true  // Force immediate refresh to see documents
+        });
+        
+        // Log the full response for debugging
+        logger.debug('Bulk response details', {
+          took: response.body.took,
+          errors: response.body.errors,
+          itemCount: response.body.items?.length,
+          firstItem: response.body.items?.[0]
         });
         
         if (response.body.errors) {
@@ -1018,6 +1027,155 @@ export class OpenSearchService {
         logger.error('Bulk indexing failed:', error);
         throw error;
       }
+    }
+  }
+
+  /**
+   * Validate if a customer has any actual conversation data
+   * Returns the count of conversations for the customer
+   */
+  async validateCustomerDataExists(customerId: string): Promise<{ exists: boolean; count: number }> {
+    try {
+      const indexName = this.getIndexName(customerId, 'transcriptions');
+      
+      // Check if index exists first
+      const indexExists = await this.client.indices.exists({ index: indexName });
+      if (!indexExists.body) {
+        logger.info(`Customer ${customerId} has no index - no data exists`);
+        return { exists: false, count: 0 };
+      }
+      
+      // Check document count in the index
+      const countResponse = await this.client.count({
+        index: indexName,
+        body: {
+          query: {
+            bool: {
+              must: [
+                { term: { customerId: customerId } }
+              ]
+            }
+          }
+        }
+      });
+      
+      const documentCount = countResponse.body.count || 0;
+      
+      logger.info(`Customer ${customerId} data validation`, {
+        indexExists: true,
+        documentCount,
+        hasData: documentCount > 0
+      });
+      
+      return {
+        exists: documentCount > 0,
+        count: documentCount
+      };
+      
+    } catch (error) {
+      logger.error(`Failed to validate customer ${customerId} data:`, error);
+      return { exists: false, count: 0 };
+    }
+  }
+
+  /**
+   * Validate if a call ID exists across all customer indices
+   * Returns the customer ID and count if found
+   */
+  async validateCallIdExists(callId: string): Promise<{ exists: boolean; count: number; customerId?: string }> {
+    try {
+      // Search across all transcription indices for the call ID
+      const searchResponse = await this.client.search({
+        index: `${this.indexPrefix}-*-transcriptions`,
+        body: {
+          query: {
+            bool: {
+              must: [
+                { term: { 'callId': callId } }
+              ]
+            }
+          },
+          size: 1,
+          _source: ['customerId', 'callId']
+        }
+      });
+      
+      const hits = searchResponse.body.hits;
+      const documentCount = typeof hits.total === 'object' ? hits.total.value : hits.total || 0;
+      
+      if (documentCount > 0 && hits.hits.length > 0) {
+        const firstHit = hits.hits[0];
+        const customerId = firstHit._source?.customerId;
+        
+        logger.info(`Call ID ${callId} validation passed`, {
+          documentCount,
+          customerId,
+          hasData: documentCount > 0
+        });
+        
+        return {
+          exists: true,
+          count: documentCount,
+          customerId: customerId
+        };
+      } else {
+        logger.info(`Call ID ${callId} not found in any customer index`);
+        return { exists: false, count: 0 };
+      }
+      
+    } catch (error) {
+      logger.error(`Failed to validate call ID ${callId}:`, error);
+      return { exists: false, count: 0 };
+    }
+  }
+
+  /**
+   * Search for a specific call ID across all customer indices
+   */
+  async searchByCallId(callId: string): Promise<SearchResponse> {
+    try {
+      const searchResponse = await this.client.search({
+        index: `${this.indexPrefix}-*-transcriptions`,
+        body: {
+          query: {
+            bool: {
+              must: [
+                { term: { 'callId': callId } }
+              ]
+            }
+          },
+          size: 10,
+          sort: [{ indexedAt: 'desc' }]
+        }
+      });
+      
+      const hits = searchResponse.body.hits;
+      const results = hits.hits.map((hit: any) => ({
+        ...hit._source,
+        score: hit._score
+      }));
+      
+      const totalHits = typeof hits.total === 'object' ? hits.total.value : hits.total || 0;
+      
+      logger.info(`Call ID search for ${callId}`, {
+        totalHits,
+        resultsCount: results.length,
+        took: searchResponse.body.took
+      });
+      
+      return {
+        total: totalHits,
+        results: results,
+        took: searchResponse.body.took || 0
+      };
+      
+    } catch (error) {
+      logger.error(`Failed to search by call ID ${callId}:`, error);
+      return {
+        total: 0,
+        results: [],
+        took: 0
+      };
     }
   }
 }

@@ -2,6 +2,8 @@ import { logger } from '../utils/logger';
 import { oracleService } from './oracle.service';
 import { mcpClientService } from './mcp-client.service';
 import { openSearchService } from './opensearch.service';
+import { getKafkaProducer } from './kafka-producer.service';
+import { ConversationAssembly, ConversationMessage } from '../types/kafka-messages';
 import { EventEmitter } from 'events';
 import oracledb from 'oracledb';
 
@@ -41,12 +43,19 @@ export class RealtimeCDCService extends EventEmitter {
   private readonly pollIntervalMs: number;
   private readonly batchSize: number;
   private readonly maxConcurrentProcessing: number;
+  
+  // Automatic Infinite Loop Prevention
+  private lastProcessedCallIds = new Set<string>();
+  private lastProcessingCycle: { callIds: string[], timestamp: Date } | null = null;
+  private consecutiveSameCycles = 0;
+  private readonly MAX_CONSECUTIVE_SAME_CYCLES = 3;
+  private circuitBreakerTripped = false;
 
   constructor() {
     super();
-    this.pollIntervalMs = parseInt(process.env.CDC_POLL_INTERVAL_MS || '5000'); // 5 seconds
-    this.batchSize = parseInt(process.env.CDC_BATCH_SIZE || '10');
-    this.maxConcurrentProcessing = parseInt(process.env.CDC_MAX_CONCURRENT || '3');
+    this.pollIntervalMs = parseInt(process.env.CDC_POLL_INTERVAL_MS || '2000'); // 2 seconds - faster
+    this.batchSize = parseInt(process.env.CDC_BATCH_SIZE || '50'); // 50 calls per batch
+    this.maxConcurrentProcessing = parseInt(process.env.CDC_MAX_CONCURRENT || '10'); // 10 concurrent
   }
 
   /**
@@ -119,6 +128,13 @@ export class RealtimeCDCService extends EventEmitter {
       return;
     }
 
+    // Check if circuit breaker is tripped
+    if (this.circuitBreakerTripped) {
+      logger.warn('🚨 CDC Circuit Breaker TRIPPED - infinite loop detected, CDC disabled');
+      await this.autoDisableCDCModes();
+      return;
+    }
+
     try {
       logger.info('🔄 CDC checking for pending changes...');
       const startTime = Date.now();
@@ -130,9 +146,26 @@ export class RealtimeCDCService extends EventEmitter {
       
       if (pendingChanges.length === 0) {
         logger.info('⏸️  No pending changes, waiting for next cycle...');
+        this.resetInfiniteLoopDetection();
         return;
       }
 
+      // AUTOMATIC INFINITE LOOP DETECTION
+      const currentCallIds = pendingChanges.map(c => c.callId).sort();
+      const currentCycle = { callIds: currentCallIds, timestamp: new Date() };
+      
+      if (this.detectInfiniteLoop(currentCycle)) {
+        logger.error('🚨 INFINITE LOOP DETECTED - Same call IDs processed repeatedly!', {
+          callIds: currentCallIds,
+          consecutiveSameCycles: this.consecutiveSameCycles
+        });
+        
+        this.circuitBreakerTripped = true;
+        await this.autoDisableCDCModes();
+        return;
+      }
+
+      this.lastProcessingCycle = currentCycle;
       logger.info(`🚀 Processing ${pendingChanges.length} CDC changes`);
 
       // Process changes in batches with limited concurrency
@@ -181,6 +214,7 @@ export class RealtimeCDCService extends EventEmitter {
       logger.info('📅 Getting CDC mode timestamps...');
       let normalModeTimestamp: Date;
       let historicalModeTimestamp: Date;
+      let normalModeEnabled: boolean = false;
       let historicalModeEnabled: boolean = false;
       
       try {
@@ -210,6 +244,7 @@ export class RealtimeCDCService extends EventEmitter {
           
           if (mode === 'CDC_NORMAL_MODE') {
             normalModeTimestamp = timestamp;
+            normalModeEnabled = enabled;  // Check if normal mode is enabled
           } else if (mode === 'CDC_HISTORICAL_MODE') {
             historicalModeTimestamp = timestamp;
             historicalModeEnabled = enabled;
@@ -229,8 +264,9 @@ export class RealtimeCDCService extends EventEmitter {
         yesterday.setDate(yesterday.getDate() - 1);
         normalModeTimestamp = yesterday;
         historicalModeTimestamp = new Date('2025-01-01');
+        normalModeEnabled = false; // Disable normal mode on error
         historicalModeEnabled = false; // Disable historical mode on error
-        logger.info(`📅 Using safe fallback - Normal: ${normalModeTimestamp}, Historical disabled`);
+        logger.info(`📅 Using safe fallback - Both normal and historical modes disabled due to error`);
       }
 
       // Test total table count first
@@ -253,24 +289,30 @@ export class RealtimeCDCService extends EventEmitter {
       logger.info('🔍 Counting records for CDC processing...');
       const countResult = await connection.execute(`
         SELECT COUNT(*) AS PENDING_COUNT FROM VERINT_TEXT_ANALYSIS 
-        WHERE (TEXT_TIME > :normalTimestamp 
+        WHERE ((:normalEnabled = 1 AND TEXT_TIME > :normalTimestamp)
                OR (:historicalEnabled = 1 AND TEXT_TIME > :historicalTimestamp))
           AND TEXT IS NOT NULL
           AND LENGTH(TEXT) > 10
+          AND TEXT_TIME <= SYSDATE + 1/1440  -- Ignore calls more than 1 minute in the future
       `, { 
         normalTimestamp: normalModeTimestamp,
         historicalTimestamp: historicalModeTimestamp,
+        normalEnabled: normalModeEnabled ? 1 : 0,
         historicalEnabled: historicalModeEnabled ? 1 : 0
       }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
       
       logger.info(`🔍 Count result: ${JSON.stringify(countResult)}`);
       const totalCount = (countResult.rows?.[0] as any)?.PENDING_COUNT as number;
-      logger.info(`🔍 Found ${totalCount} records for processing (normal: ${normalModeTimestamp}, historical: ${historicalModeEnabled ? historicalModeTimestamp : 'disabled'})`);
+      logger.info(`🔍 Found ${totalCount} records for processing (normal: ${normalModeEnabled ? normalModeTimestamp : 'disabled'}, historical: ${historicalModeEnabled ? historicalModeTimestamp : 'disabled'})`);
 
       // Get records for both normal and historical modes
-      logger.info(`Querying for records - Normal after: ${normalModeTimestamp}, Historical: ${historicalModeEnabled ? `after ${historicalModeTimestamp}` : 'disabled'}`);
+      logger.info(`Querying for records - Normal: ${normalModeEnabled ? `after ${normalModeTimestamp}` : 'disabled'}, Historical: ${historicalModeEnabled ? `after ${historicalModeTimestamp}` : 'disabled'}`);
       
       // Get complete conversations that have both agent and customer messages
+      // PRODUCTION OPTIMIZATION: Limit batch size to prevent system overload
+      const batchLimit = Math.min(this.batchSize, 50); // Maximum 50 calls per batch
+      logger.info(`📊 Using batch limit: ${batchLimit} (configured: ${this.batchSize})`);
+      
       const result = await connection.execute(`
         WITH complete_calls AS (
           SELECT DISTINCT
@@ -282,10 +324,11 @@ export class RealtimeCDCService extends EventEmitter {
             COUNT(DISTINCT OWNER) as OWNER_TYPES,
             COUNT(*) as MESSAGE_COUNT
           FROM VERINT_TEXT_ANALYSIS
-          WHERE (TEXT_TIME > :normalTimestamp 
+          WHERE ((:normalEnabled = 1 AND TEXT_TIME > :normalTimestamp)
                  OR (:historicalEnabled = 1 AND TEXT_TIME > :historicalTimestamp))
             AND TEXT IS NOT NULL
             AND LENGTH(TEXT) > 10
+            AND TEXT_TIME <= SYSDATE + 1/1440  -- Ignore calls more than 1 minute in the future
           GROUP BY CALL_ID, BAN, SUBSCRIBER_NO
           HAVING COUNT(DISTINCT OWNER) = 2  -- Must have both 'A' and 'C'
         )
@@ -307,17 +350,23 @@ export class RealtimeCDCService extends EventEmitter {
       `, {
         normalTimestamp: normalModeTimestamp,
         historicalTimestamp: historicalModeTimestamp,
+        normalEnabled: normalModeEnabled ? 1 : 0,
         historicalEnabled: historicalModeEnabled ? 1 : 0,
-        limit: this.batchSize
+        limit: batchLimit
       }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
       
       logger.info(`Query returned ${result.rows?.length || 0} rows`);
 
       if (!result.rows || result.rows.length === 0) {
-        // If historical mode was enabled but no records found, disable it
+        // If historical mode was enabled but no records found, disable it and enable normal mode
         if (historicalModeEnabled) {
-          logger.info('🎯 Historical CDC completed - no more old data found, disabling historical mode');
+          logger.info('🎯 Historical CDC completed - no more old data found, switching to production mode');
           await this.autoDisableHistoricalMode(connection);
+        }
+        // If normal mode is disabled and no historical processing, enable normal mode
+        else if (!normalModeEnabled && !historicalModeEnabled) {
+          logger.info('🚀 Enabling normal CDC mode for real-time processing');
+          await this.enableNormalMode(connection);
         }
         return [];
       }
@@ -369,6 +418,56 @@ export class RealtimeCDCService extends EventEmitter {
       }
     }
     
+    // Create ERROR_LOG table for error handler consumer
+    // Note: Using RAW(16) for ERROR_ID to support SYS_GUID() in error-handler-consumer.service.ts
+    logger.info('🔍 Creating ERROR_LOG table if needed...');
+    try {
+      await connection.execute(`
+        CREATE TABLE ERROR_LOG (
+          ERROR_ID RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+          ORIGINAL_TOPIC VARCHAR2(255),
+          ERROR_MESSAGE CLOB,
+          ERROR_TYPE VARCHAR2(100),
+          PROCESSING_ATTEMPTS NUMBER,
+          ORIGINAL_MESSAGE CLOB,
+          ERROR_TIMESTAMP TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          CALL_ID VARCHAR2(50),
+          CREATED_AT TIMESTAMP DEFAULT SYSDATE
+        )
+      `);
+      logger.info('✅ ERROR_LOG table created');
+    } catch (error: any) {
+      if (error?.errorNum === 955) { // Table already exists
+        logger.info('✅ ERROR_LOG table already exists');
+      } else {
+        logger.warn('⚠️  ERROR_LOG table creation warning:', error?.message);
+      }
+    }
+    
+    // Create KAFKA_PERMANENT_FAILURES table if needed
+    logger.info('🔍 Creating KAFKA_PERMANENT_FAILURES table if needed...');
+    try {
+      await connection.execute(`
+        CREATE TABLE KAFKA_PERMANENT_FAILURES (
+          FAILURE_ID RAW(16) DEFAULT SYS_GUID() PRIMARY KEY,
+          ORIGINAL_TOPIC VARCHAR2(255),
+          ERROR_MESSAGE CLOB,
+          ERROR_TYPE VARCHAR2(100),
+          TOTAL_ATTEMPTS NUMBER,
+          ORIGINAL_MESSAGE CLOB,
+          FIRST_ERROR_TIMESTAMP TIMESTAMP,
+          MARKED_FAILED_AT TIMESTAMP DEFAULT SYSDATE
+        )
+      `);
+      logger.info('✅ KAFKA_PERMANENT_FAILURES table created');
+    } catch (error: any) {
+      if (error?.errorNum === 955) { // Table already exists
+        logger.info('✅ KAFKA_PERMANENT_FAILURES table already exists');
+      } else {
+        logger.warn('⚠️  KAFKA_PERMANENT_FAILURES table creation warning:', error?.message);
+      }
+    }
+    
     // Check for CDC mode tracking records
     logger.info('🔍 Checking for existing CDC mode tracking records...');
     const checkResult = await connection.execute(`
@@ -412,10 +511,11 @@ export class RealtimeCDCService extends EventEmitter {
   }
 
   /**
-   * Automatically disable historical CDC mode when no more old data found
+   * Automatically disable historical CDC mode and enable normal mode for production robustness
    */
   private async autoDisableHistoricalMode(connection: any): Promise<void> {
     try {
+      // Disable historical mode (completed processing old data)
       await connection.execute(`
         UPDATE CDC_PROCESSING_STATUS 
         SET 
@@ -424,11 +524,95 @@ export class RealtimeCDCService extends EventEmitter {
         WHERE TABLE_NAME = 'CDC_HISTORICAL_MODE'
       `);
       
+      // Enable normal mode for real-time processing (production robustness)
+      await connection.execute(`
+        UPDATE CDC_PROCESSING_STATUS 
+        SET 
+          TOTAL_PROCESSED = 1,
+          LAST_PROCESSED_TIMESTAMP = CURRENT_TIMESTAMP,
+          LAST_UPDATED = CURRENT_TIMESTAMP
+        WHERE TABLE_NAME = 'CDC_NORMAL_MODE'
+      `);
+      
       await connection.commit();
-      logger.info('✅ Historical CDC mode auto-disabled - returning to normal CDC only');
+      logger.info('🔄 Production mode activated: Historical CDC disabled, Normal CDC enabled for real-time processing');
       
     } catch (error) {
-      logger.error('❌ Failed to auto-disable historical mode:', error);
+      logger.error('❌ Failed to switch to production mode:', error);
+    }
+  }
+
+  /**
+   * Enable normal CDC mode for real-time processing
+   */
+  private async enableNormalMode(connection: any): Promise<void> {
+    try {
+      await connection.execute(`
+        UPDATE CDC_PROCESSING_STATUS 
+        SET 
+          TOTAL_PROCESSED = 1,
+          LAST_PROCESSED_TIMESTAMP = CURRENT_TIMESTAMP,
+          LAST_UPDATED = CURRENT_TIMESTAMP
+        WHERE TABLE_NAME = 'CDC_NORMAL_MODE'
+      `);
+      
+      await connection.commit();
+      logger.info('✅ Normal CDC mode enabled for real-time processing');
+      
+    } catch (error) {
+      logger.error('❌ Failed to enable normal mode:', error);
+    }
+  }
+
+  /**
+   * Build conversation messages for Kafka ConversationAssembly
+   */
+  private async buildConversationMessages(callId: string): Promise<ConversationMessage[]> {
+    let connection;
+    try {
+      logger.info(`🔍 Getting Oracle connection for call ${callId}`);
+      connection = await oracleService.getConnection();
+      logger.info(`✅ Got Oracle connection, executing query for call ${callId}`);
+      
+      const result = await connection.execute(`
+        SELECT 
+          OWNER,
+          TEXT,
+          TEXT_TIME
+        FROM VERINT_TEXT_ANALYSIS
+        WHERE TO_CHAR(CALL_ID) = TO_CHAR(:callId)
+        ORDER BY TEXT_TIME ASC
+      `, { callId }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+
+      logger.info(`✅ Query executed, found ${result.rows?.length || 0} rows for call ${callId}`);
+
+      if (!result.rows || result.rows.length === 0) {
+        logger.warn(`⚠️ No conversation messages found for call ${callId}`);
+        return [];
+      }
+
+      // Convert Oracle rows to ConversationMessage format
+      const messages = result.rows.map((row: any, index: number) => ({
+        messageId: `${callId}-${index}`,
+        speaker: row.OWNER === 'A' ? 'agent' : 'customer',
+        text: row.TEXT,
+        timestamp: new Date(row.TEXT_TIME),
+        metadata: {
+          originalOwner: row.OWNER,
+          sequenceNumber: index
+        }
+      }));
+      
+      logger.info(`✅ Successfully built ${messages.length} conversation messages for call ${callId}`);
+      return messages;
+      
+    } catch (error) {
+      logger.error(`❌ Error building conversation messages for call ${callId}:`, error);
+      throw error;
+    } finally {
+      if (connection) {
+        await connection.close();
+      }
     }
   }
 
@@ -487,7 +671,7 @@ export class RealtimeCDCService extends EventEmitter {
 
       // Skip DELETE operations for now
       if (change.changeType === 'DELETE') {
-        await this.markChangeProcessed(change.changeId, Date.now() - startTime);
+        await this.markChangeProcessed(change.changeId, Date.now() - startTime, change.textTime);
         return {
           ...processingResult,
           success: true,
@@ -519,29 +703,15 @@ export class RealtimeCDCService extends EventEmitter {
         subscriberIds: [change.subscriberNo]
       };
 
-      // SIMPLIFIED: Generate embedding and index directly in OpenSearch 
-      logger.info(`🚀 Processing conversation ${change.callId} with OpenSearch vector indexing`);
+      // UNIFIED PIPELINE: Send to Kafka for ML Consumer processing (classifications + embeddings + indexing)
+      logger.info(`🚀 Sending conversation ${change.callId} to Kafka for ML Consumer processing`);
       
-      let embeddingVector: number[] | null = null;
-      let sentiment = 'neutral';
+      // No direct ML processing - let the ML Consumer handle everything
+      // This ensures ONE unified pipeline: CDC → Kafka → ML Consumer → Classifications → OpenSearch
       
-      // Generate embedding using ML service
-      try {
-        const embeddingResult = await this.generateEmbedding(fullConversation);
-        if (embeddingResult.success) {
-          embeddingVector = embeddingResult.embedding;
-          logger.info(`✅ Generated embedding for conversation ${change.callId}`);
-        }
-      } catch (embError) {
-        logger.warn(`⚠️ Failed to generate embedding: ${embError.message}`);
-      }
-      
-      // Simple sentiment analysis (can be enhanced later)
-      if (fullConversation.includes('תודה') || fullConversation.includes('מעולה')) {
-        sentiment = 'positive';
-      } else if (fullConversation.includes('בעיה') || fullConversation.includes('לא עובד')) {
-        sentiment = 'negative';  
-      }
+      // Set defaults since we're not doing direct ML processing
+      const embeddingVector: number[] | null = null;
+      const sentiment = 'neutral';
 
       processingResult = {
         changeId: change.changeId,
@@ -558,65 +728,72 @@ export class RealtimeCDCService extends EventEmitter {
         }
       };
 
-        // Index in OpenSearch with vector embeddings
+        // Unified pipeline: Direct indexing disabled - ML Consumer handles all processing
+        logger.info(`📨 CDC will publish to Kafka - ML Consumer handles classifications + OpenSearch`);
+        processingResult.results!.openSearchIndexed = false;
+        processingResult.results!.vectorStored = false;
+
+        // UNIFIED PIPELINE: Publish to Kafka for ML Consumer processing  
         try {
-          logger.info(`📄 Indexing conversation ${change.callId} in OpenSearch with vectors`);
+          logger.info(`📨 Publishing conversation ${change.callId} to Kafka for ML Consumer`);
           
-          const openSearchCustomerContext = {
-            customerId: change.customerId,
-            tier: 'standard',
-            language: 'he'
-          };
+          // Create ConversationAssembly message for ML Consumer
+          logger.info(`🔍 Building conversation messages for call ${change.callId}`);
+          const messages = await this.buildConversationMessages(change.callId);
+          logger.info(`✅ Built ${messages.length} conversation messages`);
           
-          const transcriptionData: any = {
+          const agentMessages = messages.filter(m => m.speaker === 'agent');
+          const customerMessages = messages.filter(m => m.speaker === 'customer');
+          
+          const conversationAssembly: ConversationAssembly = {
+            type: 'conversation-assembly',
             callId: change.callId,
             customerId: change.customerId,
-            subscriberId: change.subscriberNo,
-            transcriptionText: fullConversation,
-            language: 'he',
-            callDate: change.callTime.toISOString().replace(/\.\d{3}Z$/, 'Z'),
-            agentId: 'multi-speaker',
-            callType: 'support',
-            sentiment: sentiment,
-            productsMentioned: [], // Can be enhanced later
-            keyPoints: [] // Can be enhanced later
+            subscriberNo: change.subscriberNo,
+            messages: messages,
+            conversationMetadata: {
+              startTime: change.callTime,
+              endTime: change.textTime,
+              duration: Math.round((change.textTime.getTime() - change.callTime.getTime()) / 1000),
+              messageCount: messages.length,
+              agentMessageCount: agentMessages.length,
+              customerMessageCount: customerMessages.length,
+              language: 'he',
+              callDate: change.callTime,
+              participants: {
+                agent: ['multi-speaker'],
+                customer: [change.subscriberNo]
+              }
+            },
+            timestamp: new Date().toISOString()
           };
           
-          // Add embedding vector if available
-          if (embeddingVector && embeddingVector.length === 768) {
-            transcriptionData.embedding = embeddingVector;
-            transcriptionData.embeddingModel = 'alephbert-hebrew';
-            logger.info(`📊 Adding ${embeddingVector.length}D embedding vector to document`);
-          }
+          // Send to Kafka for ML Consumer processing
+          const kafkaProducer = getKafkaProducer();
+          logger.info(`🚀 About to send ConversationAssembly to Kafka`, {
+            callId: conversationAssembly.callId,
+            messageCount: conversationAssembly.messages.length,
+            topic: 'conversation-assembly'
+          });
           
-          const indexSuccess = await openSearchService.indexDocument(
-            openSearchCustomerContext,
-            'transcriptions',
-            transcriptionData
-          );
+          await kafkaProducer.sendConversationAssembly(conversationAssembly);
           
-          if (indexSuccess) {
-            logger.info(`✅ OpenSearch vector indexing completed for call ${change.callId}`);
-            processingResult.results!.openSearchIndexed = true;
-            processingResult.results!.vectorStored = !!embeddingVector;
-            processingResult.success = true; // Mark as successful
-          } else {
-            logger.warn(`⚠️ OpenSearch indexing failed for call ${change.callId}`);
-            processingResult.results!.openSearchIndexed = false;
-          }
+          processingResult.success = true; // Mark as successful after Kafka publishing
+          logger.info(`✅ CDC successfully published to Kafka - ML Consumer will handle classifications + OpenSearch`);
           
-        } catch (indexError) {
-          logger.error(`❌ OpenSearch indexing error for call ${change.callId}:`, indexError);
-          processingResult.results!.openSearchIndexed = false;
+        } catch (kafkaError) {
+          logger.error(`❌ Kafka publishing error for call ${change.callId}:`, kafkaError);
+          processingResult.success = false;
         }
 
-        // Update AI metadata
-        await this.updateAIMetadata(change.callId, change.customerId, processingResult.results!);
+        // Update AI metadata - but let ML Consumer handle the heavy lifting
+        // await this.updateAIMetadata(change.callId, change.customerId, processingResult.results!);
 
-      // Mark change as processed
+      // Mark change as processed with the conversation's latest TEXT_TIME to prevent reprocessing
       await this.markChangeProcessed(
         change.changeId,
         processingResult.processingTime,
+        change.textTime,  // Use conversation's latest TEXT_TIME as new CDC timestamp
         processingResult.error
       );
 
@@ -629,8 +806,8 @@ export class RealtimeCDCService extends EventEmitter {
       
       logger.error(`Error processing CDC change ${change.changeId}:`, error);
 
-      // Mark change as processed with error
-      await this.markChangeProcessed(change.changeId, processingTime, errorMessage);
+      // Mark change as processed with error, still use conversation's TEXT_TIME to prevent reprocessing
+      await this.markChangeProcessed(change.changeId, processingTime, change.textTime, errorMessage);
 
       const result: CDCProcessingResult = {
         changeId: change.changeId,
@@ -729,28 +906,34 @@ export class RealtimeCDCService extends EventEmitter {
   private async markChangeProcessed(
     changeId: number,
     processingTime: number,
+    conversationLatestTime?: Date,
     errorMessage?: string
   ): Promise<void> {
     const connection = await oracleService.getConnection();
     
     try {
-      // Update BOTH normal and historical mode timestamps
-      // This ensures historical mode progresses and eventually finds no more records
+      // Update timestamps to the LATEST TEXT_TIME of processed conversation to prevent reprocessing
+      const timestampToUse = conversationLatestTime || new Date();
+      
       await connection.execute(`
         UPDATE CDC_PROCESSING_STATUS 
         SET 
-          LAST_PROCESSED_TIMESTAMP = CURRENT_TIMESTAMP,
+          LAST_PROCESSED_TIMESTAMP = :processedTime,
           LAST_CHANGE_ID = :changeId,
-          TOTAL_PROCESSED = TOTAL_PROCESSED + 1,
+          TOTAL_PROCESSED = GREATEST(TOTAL_PROCESSED, 1),
           LAST_UPDATED = CURRENT_TIMESTAMP
-        WHERE TABLE_NAME IN ('CDC_NORMAL_MODE', 'CDC_HISTORICAL_MODE')
+        WHERE TABLE_NAME = 'CDC_NORMAL_MODE'
+          AND TOTAL_PROCESSED = 1
       `, {
-        changeId
+        changeId,
+        processedTime: timestampToUse
       });
 
       // Log processing result for monitoring
+      // Use MERGE to prevent ORA-00001 unique constraint violations on duplicate CHANGE_ID
       await connection.execute(`
-        INSERT INTO CDC_PROCESSING_LOG (
+        MERGE INTO CDC_PROCESSING_LOG USING DUAL ON (CHANGE_ID = :changeId)
+        WHEN NOT MATCHED THEN INSERT (
           CHANGE_ID,
           TABLE_NAME,
           PROCESSING_TIME_MS,
@@ -868,6 +1051,84 @@ export class RealtimeCDCService extends EventEmitter {
     } finally {
       await connection.close();
     }
+  }
+
+  /**
+   * AUTOMATIC INFINITE LOOP DETECTION
+   */
+  private detectInfiniteLoop(currentCycle: { callIds: string[], timestamp: Date }): boolean {
+    if (!this.lastProcessingCycle) {
+      return false;
+    }
+
+    // Check if we're processing the exact same call IDs as last cycle
+    const lastCallIds = this.lastProcessingCycle.callIds;
+    const currentCallIds = currentCycle.callIds;
+    
+    if (this.arraysEqual(lastCallIds, currentCallIds)) {
+      this.consecutiveSameCycles++;
+      logger.warn(`🔄 CDC processing same call IDs (cycle ${this.consecutiveSameCycles}/${this.MAX_CONSECUTIVE_SAME_CYCLES})`, {
+        callIds: currentCallIds,
+        timeSinceLastCycle: Date.now() - this.lastProcessingCycle.timestamp.getTime()
+      });
+      
+      return this.consecutiveSameCycles >= this.MAX_CONSECUTIVE_SAME_CYCLES;
+    }
+
+    // Different call IDs - reset counter
+    this.consecutiveSameCycles = 0;
+    return false;
+  }
+
+  private resetInfiniteLoopDetection(): void {
+    this.consecutiveSameCycles = 0;
+    this.lastProcessingCycle = null;
+  }
+
+  private arraysEqual(a: string[], b: string[]): boolean {
+    if (a.length !== b.length) return false;
+    return a.every((val, i) => val === b[i]);
+  }
+
+  /**
+   * AUTOMATIC CDC DISABLE ON INFINITE LOOP
+   */
+  private async autoDisableCDCModes(): Promise<void> {
+    try {
+      logger.error('🚨 AUTO-DISABLING CDC MODES to prevent infinite loop');
+      
+      const connection = await oracleService.getConnection();
+      try {
+        // Disable both CDC modes
+        await connection.execute(`
+          UPDATE CDC_PROCESSING_STATUS 
+          SET TOTAL_PROCESSED = 0,  -- Disable both modes
+              LAST_UPDATED = CURRENT_TIMESTAMP
+          WHERE TABLE_NAME IN ('CDC_NORMAL_MODE', 'CDC_HISTORICAL_MODE')
+        `);
+        await connection.commit();
+        
+        logger.info('✅ CDC modes automatically disabled due to infinite loop detection');
+        
+        // Stop the service
+        await this.stop();
+        
+      } finally {
+        await connection.close();
+      }
+      
+    } catch (error) {
+      logger.error('❌ Failed to auto-disable CDC modes:', error);
+    }
+  }
+
+  /**
+   * Reset circuit breaker (for manual recovery)
+   */
+  public resetCircuitBreaker(): void {
+    this.circuitBreakerTripped = false;
+    this.resetInfiniteLoopDetection();
+    logger.info('🔄 CDC Circuit Breaker RESET - infinite loop protection re-enabled');
   }
 }
 

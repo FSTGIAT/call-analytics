@@ -28,6 +28,7 @@ interface MLServiceResponse {
         confidence: number;
         isHebrew: boolean;
     };
+    classifications?: string[];  // Added classifications field
     entities?: {
         persons: string[];
         locations: string[];
@@ -51,6 +52,7 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
     private config: MLProcessingConfig;
     private processingQueue = new Map<string, ConversationAssembly>();
     private processingInProgress = new Set<string>();
+    private processedConversations = new Map<string, { messageCount: number; lastProcessed: Date; messageId: string }>(); // Track processed conversations with metadata
 
     constructor() {
         super({
@@ -76,6 +78,15 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
         context: ProcessingContext
     ): Promise<void> {
         try {
+            logger.info('🎯 ML Consumer received message from Kafka!', {
+                callId: message.callId,
+                messageCount: message.messages.length,
+                duration: message.conversationMetadata.duration,
+                partition: context.partition,
+                offset: context.offset,
+                topic: context.topic
+            });
+            
             logger.info('Processing conversation for ML analysis', {
                 callId: message.callId,
                 messageCount: message.messages.length,
@@ -84,12 +95,47 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
                 offset: context.offset
             });
 
-            // Prevent duplicate processing
+            // Prevent duplicate processing (concurrent)
             if (this.processingInProgress.has(message.callId)) {
-                logger.warn('Conversation already being processed, skipping', {
+                logger.warn('Conversation already being processed concurrently, skipping', {
                     callId: message.callId
                 });
                 return;
+            }
+
+            // Check if conversation needs reprocessing (updated with new messages)
+            const lastProcessed = this.processedConversations.get(message.callId);
+            if (lastProcessed) {
+                // Allow reprocessing if:
+                // 1. Message count has increased (new messages added)
+                // 2. Different messageId (conversation updated)
+                // 3. More than 1 minute has passed (in case of timing issues)
+                const timeSinceLastProcess = Date.now() - lastProcessed.lastProcessed.getTime();
+                const messageCountChanged = message.messages.length !== lastProcessed.messageCount;
+                const messageIdChanged = message.messageId !== lastProcessed.messageId;
+                const timeThresholdPassed = timeSinceLastProcess > 60000; // 1 minute
+                
+                if (!messageCountChanged && !messageIdChanged && !timeThresholdPassed) {
+                    logger.info('Conversation already processed and unchanged, skipping', {
+                        callId: message.callId,
+                        currentMessageCount: message.messages.length,
+                        lastMessageCount: lastProcessed.messageCount,
+                        currentMessageId: message.messageId,
+                        lastMessageId: lastProcessed.messageId,
+                        timeSinceLastProcess: `${Math.round(timeSinceLastProcess / 1000)}s`
+                    });
+                    return;
+                } else {
+                    logger.info('Conversation updated, reprocessing', {
+                        callId: message.callId,
+                        messageCountChanged,
+                        messageIdChanged,
+                        timeThresholdPassed,
+                        oldMessageCount: lastProcessed.messageCount,
+                        newMessageCount: message.messages.length,
+                        timeSinceLastProcess: `${Math.round(timeSinceLastProcess / 1000)}s`
+                    });
+                }
             }
 
             this.processingInProgress.add(message.callId);
@@ -102,11 +148,20 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
                 const kafkaProducer = getKafkaProducer();
                 await kafkaProducer.sendMLProcessingResult(mlResult);
 
+                // Mark as processed with metadata to enable smart reprocessing
+                this.processedConversations.set(message.callId, {
+                    messageCount: message.messages.length,
+                    lastProcessed: new Date(),
+                    messageId: message.messageId
+                });
+
                 logger.info('ML processing completed successfully', {
                     callId: message.callId,
+                    messageCount: message.messages.length,
                     detectedLanguage: mlResult.language.detected,
                     sentiment: mlResult.sentiment.overall,
-                    embeddingSize: mlResult.embedding.length
+                    embeddingSize: mlResult.embedding.length,
+                    totalProcessedConversations: this.processedConversations.size
                 });
 
             } finally {
@@ -138,9 +193,16 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
             callId: conversation.callId,
             customerId: conversation.customerId,
             subscriberId: conversation.subscriberNo,
+            conversationText: conversationText, // Include full original conversation text
             embedding: mlResponse.embedding,
             sentiment: mlResponse.sentiment,
             language: mlResponse.language,
+            classifications: mlResponse.classifications && mlResponse.classifications.length > 0 ? {
+                primary: mlResponse.classifications[0] || '',
+                secondary: mlResponse.classifications.slice(1) || [],
+                all: mlResponse.classifications || [],
+                confidence: 0.9  // High confidence for Hebrew classification
+            } : undefined,
             entities: mlResponse.entities,
             summary: mlResponse.summary,
             topics: mlResponse.topics,
@@ -205,7 +267,10 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
                             includeEntities: true,
                             includeSummary: true,
                             includeTopics: true,
-                            language: 'auto-detect'
+                            language: 'auto-detect',
+                            // New: Enable automatic Hebrew prompt with call ID
+                            useCallIdPrompt: true,
+                            promptTemplate: 'summarize_with_id'
                         }
                     },
                     {
@@ -277,6 +342,7 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
                           response.language.detected === 'he' ||
                           response.language.detected === 'hebrew'
             },
+            classifications: response.classifications || [],  // Extract classifications from ML service
             entities: response.entities || {
                 persons: [],
                 locations: [],
@@ -284,10 +350,12 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
                 phoneNumbers: [],
                 emails: []
             },
-            summary: response.summary || {
-                text: 'Summary not available',
-                keyPoints: []
-            },
+            summary: typeof response.summary === 'string' 
+                ? { text: response.summary, keyPoints: [] }
+                : response.summary || {
+                    text: 'Summary not available',
+                    keyPoints: []
+                },
             topics: response.topics || {
                 primary: 'general',
                 secondary: [],

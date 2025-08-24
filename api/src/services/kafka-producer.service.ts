@@ -121,6 +121,13 @@ export class KafkaProducerService {
                 try {
                     await this.producer.connect();
                     logger.info('Kafka producer service connected successfully');
+                    
+                    // Ensure required topics exist - with retry
+                    await this.ensureTopicsExist();
+                    
+                    // Wait a moment for topics to be ready
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    
                     return;
                 } catch (connectError) {
                     retries--;
@@ -144,6 +151,123 @@ export class KafkaProducerService {
                 clientId: this.config.clientId
             });
             throw error;
+        }
+    }
+
+    private async ensureTopicsExist(): Promise<void> {
+        const admin = this.kafka.admin();
+        
+        try {
+            await admin.connect();
+            
+            const requiredTopics = [
+                {
+                    topic: process.env.KAFKA_TOPIC_CDC_RAW_CHANGES || 'cdc-raw-changes',
+                    numPartitions: 3,
+                    replicationFactor: 1
+                },
+                {
+                    topic: process.env.KAFKA_TOPIC_CONVERSATION_ASSEMBLY || 'conversation-assembly',
+                    numPartitions: 3,
+                    replicationFactor: 1
+                },
+                {
+                    topic: process.env.KAFKA_TOPIC_ML_PROCESSING || 'ml-processing-queue',
+                    numPartitions: 3,
+                    replicationFactor: 1
+                },
+                {
+                    topic: process.env.KAFKA_TOPIC_OPENSEARCH_INDEX || 'opensearch-bulk-index',
+                    numPartitions: 3,
+                    replicationFactor: 1
+                },
+                {
+                    topic: process.env.KAFKA_TOPIC_FAILED_RECORDS || 'failed-records-dlq',
+                    numPartitions: 1,
+                    replicationFactor: 1
+                },
+                {
+                    topic: 'processing-metrics',
+                    numPartitions: 1,
+                    replicationFactor: 1
+                }
+            ];
+
+            const existingTopics = await admin.listTopics();
+            const topicsToCreate = requiredTopics.filter(t => !existingTopics.includes(t.topic));
+            
+            if (topicsToCreate.length > 0) {
+                logger.info('Creating missing Kafka topics...', {
+                    topics: topicsToCreate.map(t => t.topic)
+                });
+                
+                await admin.createTopics({
+                    topics: topicsToCreate,
+                    waitForLeaders: true,
+                    timeout: 5000
+                });
+                
+                logger.info('Kafka topics created successfully', {
+                    createdTopics: topicsToCreate.map(t => t.topic)
+                });
+            } else {
+                logger.info('All required Kafka topics already exist');
+            }
+            
+            await admin.disconnect();
+        } catch (error) {
+            logger.error('Failed to ensure Kafka topics exist', { error });
+            try {
+                await admin.disconnect();
+            } catch (disconnectError) {
+                logger.warn('Failed to disconnect admin client', { error: disconnectError });
+            }
+            
+            // Retry topic creation with more aggressive approach
+            logger.warn('Retrying topic creation with individual topic creation...');
+            await this.retryTopicCreation();
+        }
+    }
+
+    private async retryTopicCreation(): Promise<void> {
+        const requiredTopics = [
+            'cdc-raw-changes',
+            'conversation-assembly', 
+            'ml-processing-queue',
+            'opensearch-bulk-index',
+            'failed-records-dlq',
+            'processing-metrics'
+        ];
+
+        for (const topicName of requiredTopics) {
+            try {
+                const admin = this.kafka.admin();
+                await admin.connect();
+                
+                const existingTopics = await admin.listTopics();
+                if (!existingTopics.includes(topicName)) {
+                    logger.info(`Creating missing topic: ${topicName}`);
+                    
+                    await admin.createTopics({
+                        topics: [{
+                            topic: topicName,
+                            numPartitions: topicName === 'failed-records-dlq' ? 1 : 3,
+                            replicationFactor: 1
+                        }],
+                        waitForLeaders: true,
+                        timeout: 10000
+                    });
+                    
+                    logger.info(`Successfully created topic: ${topicName}`);
+                } else {
+                    logger.debug(`Topic ${topicName} already exists`);
+                }
+                
+                await admin.disconnect();
+            } catch (error) {
+                logger.error(`Failed to create topic ${topicName}`, { error });
+                // Continue with next topic instead of failing completely
+            }
         }
     }
 
@@ -254,12 +378,13 @@ export class KafkaProducerService {
             this.metrics.messagesSent++;
             this.metrics.bytesSent += messageSize;
 
-            logger.debug('Message sent to Kafka', {
+            logger.info('✅ Message successfully sent to Kafka', {
                 topic,
                 key,
                 partition: result[0].partition,
                 offset: result[0].baseOffset,
-                messageSize
+                messageSize,
+                messageType: message.type
             });
 
         } catch (error) {

@@ -157,7 +157,7 @@ class LLMOrchestrator:
                         service.generate_response(
                             prompt=prompt,
                             system_prompt=system_prompt,
-                            max_tokens=kwargs.get('max_tokens', 300),  # Much smaller for faster responses
+                            max_tokens=kwargs.get('max_tokens', 800),  # Increased for complex conversations
                             temperature=kwargs.get('temperature', 0.3),
                             # Removed model_preference - not supported by Ollama service
                             **kwargs
@@ -254,23 +254,35 @@ class LLMOrchestrator:
     async def summarize_call(
         self,
         transcription: str,
+        call_id: str = None,
         language: str = 'hebrew',
-        prefer_local: bool = True
+        prefer_local: bool = True,
+        use_call_id_prompt: bool = True,
+        prompt_template: str = 'summarize_with_id'
     ) -> Dict:
         """
         Summarize call with intelligent routing.
         Uses Hebrew-Mistral for Hebrew tasks, Ollama for English.
+        Now supports automatic Hebrew prompt generation with call ID.
         """
         start_time = datetime.now()
         
         # Use Ollama for all languages (DictaLM for Hebrew, Mistral for English)
         if prefer_local:
             try:
-                logger.info(f"Attempting call summarization with Ollama (language: {language})")
+                logger.info(f"Attempting call summarization with Ollama (language: {language}, call_id: {call_id})")
                 result = await ollama_service.summarize_call(
                     transcription=transcription,
-                    language=language
+                    call_id=call_id,
+                    language=language,
+                    use_call_id_prompt=use_call_id_prompt,
+                    prompt_template=prompt_template
                 )
+                
+                # Debug: Log what Ollama returned
+                logger.info(f"Ollama service returned: success={result.get('success')}")
+                logger.info(f"Ollama result keys: {list(result.keys())}")
+                logger.info(f"Ollama summary data: {result.get('summary', 'NO_SUMMARY')}")
                 
                 if result['success']:
                     self.stats['ollama_requests'] += 1
@@ -282,25 +294,7 @@ class LLMOrchestrator:
             except Exception as e:
                 logger.error(f"Ollama summarization error: {e}")
         
-        # Try Bedrock fallback for any language
-        # Bedrock fallback removed - using only Ollama
-        # if self.fallback_enabled and bedrock_service.enabled:
-        #     try:
-        #         logger.info("Attempting call summarization with Bedrock fallback")
-        #         result = await bedrock_service.summarize_call_fallback(
-        #             transcription=transcription,
-        #             language=language
-        #         )
-                
-                if result['success']:
-                    self.stats['bedrock_requests'] += 1
-                    self.stats['fallback_triggers'] += 1
-                    return result
-                else:
-                    logger.error(f"Bedrock summarization failed: {result.get('error')}")
-                    
-            except Exception as e:
-                logger.error(f"Bedrock fallback error: {e}")
+        # Bedrock fallback removed - using only Ollama/DictaLM for all processing
         
         # All methods failed - return basic summary
         end_time = datetime.now()
