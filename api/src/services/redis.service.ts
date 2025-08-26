@@ -1,38 +1,72 @@
 import Redis from 'ioredis';
 import { logger } from '../utils/logger';
+import { secretsService } from './secrets.service';
 
 export class RedisService {
   private client: Redis;
   private isConnected = false;
 
   constructor() {
-    const redisConfig = {
-      host: process.env.REDIS_HOST || 'redis',
-      port: parseInt(process.env.REDIS_PORT || '6379'),
-      password: process.env.REDIS_PASSWORD,
-      db: parseInt(process.env.REDIS_DB || '0'),
-      retryStrategy: (times: number) => {
-        const delay = Math.min(times * 50, 2000);
-        return delay;
+    this.initializeConnection();
+  }
+
+  private async initializeConnection() {
+    try {
+      let redisConfig;
+      
+      if (secretsService.isAWSEnvironment()) {
+        const redisSecrets = await secretsService.getRedisConfig();
+        redisConfig = {
+          host: process.env.REDIS_HOST || 'redis',
+          port: parseInt(process.env.REDIS_PORT || '6379'),
+          password: redisSecrets.password,
+          db: parseInt(redisSecrets.db || '0'),
+          retryStrategy: (times: number) => {
+            const delay = Math.min(times * 50, 2000);
+            return delay;
+          }
+        };
+        logger.info('Redis configuration loaded from AWS Secrets Manager');
+      } else {
+        redisConfig = {
+          host: process.env.REDIS_HOST || 'redis',
+          port: parseInt(process.env.REDIS_PORT || '6379'),
+          password: process.env.REDIS_PASSWORD,
+          db: parseInt(process.env.REDIS_DB || '0'),
+          retryStrategy: (times: number) => {
+            const delay = Math.min(times * 50, 2000);
+            return delay;
+          }
+        };
+        logger.info('Redis configuration loaded from environment variables (local mode)');
       }
-    };
 
-    this.client = new Redis(redisConfig);
+      this.client = new Redis(redisConfig);
 
-    this.client.on('connect', () => {
-      this.isConnected = true;
-      logger.info('Redis connected successfully');
-    });
+      this.client.on('connect', () => {
+        this.isConnected = true;
+        logger.info('Redis connected successfully');
+      });
 
-    this.client.on('error', (err) => {
-      this.isConnected = false;
-      logger.error('Redis connection error:', err);
-    });
+      this.client.on('error', (err) => {
+        this.isConnected = false;
+        logger.error('Redis connection error:', err);
+      });
 
-    this.client.on('close', () => {
-      this.isConnected = false;
-      logger.warn('Redis connection closed');
-    });
+      this.client.on('close', () => {
+        this.isConnected = false;
+        logger.warn('Redis connection closed');
+      });
+      
+    } catch (error) {
+      logger.error('Failed to initialize Redis connection:', error);
+      // Fallback to basic connection without password for local development
+      this.client = new Redis({
+        host: process.env.REDIS_HOST || 'redis',
+        port: parseInt(process.env.REDIS_PORT || '6379'),
+        retryStrategy: (times: number) => Math.min(times * 50, 2000)
+      });
+    }
   }
 
   async get(key: string): Promise<string | null> {

@@ -4,6 +4,7 @@ import { redisService } from '../services/redis.service';
 import { openSearchService } from '../services/opensearch.service';
 import { vectorStorageService } from '../services/vector-storage.service';
 import { realtimeCDCService } from '../services/realtime-cdc.service';
+import { secretsService } from '../services/secrets.service';
 
 async function startup() {
   console.log('🚀 Starting Call Analytics API...');
@@ -55,6 +56,13 @@ async function startup() {
 }
 
 function validateEnvironment() {
+  // Skip environment validation in AWS mode - secrets will be loaded from AWS Secrets Manager
+  if (secretsService.isAWSEnvironment()) {
+    console.log('🔐 AWS environment detected - using AWS Secrets Manager for configuration');
+    return;
+  }
+  
+  // Validate environment variables for local development
   const required = [
     'ORACLE_USER', 'ORACLE_PASSWORD', 'ORACLE_HOST',
     'OPENSEARCH_URL', 'REDIS_HOST'

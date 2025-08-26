@@ -51,9 +51,10 @@ export class OpenSearchService {
 
   constructor() {
     this.config = {
-      node: process.env.OPENSEARCH_HOST 
-        ? `http://${process.env.OPENSEARCH_HOST}:${process.env.OPENSEARCH_PORT || 9200}`
-        : 'http://localhost:9200',
+      node: process.env.OPENSEARCH_URL || 
+        (process.env.OPENSEARCH_HOST 
+          ? `http://${process.env.OPENSEARCH_HOST}:${process.env.OPENSEARCH_PORT || 9200}`
+          : 'http://opensearch:9200'),
       ssl: {
         rejectUnauthorized: false
       }

@@ -1,0 +1,444 @@
+version: '3.8'
+
+# Common configurations
+x-aws-logs: &aws-logs
+  logging:
+    driver: awslogs
+    options:
+      awslogs-region: ${AWS_REGION:-eu-west-1}
+      awslogs-stream-prefix: call-analytics
+
+x-common-environment: &common-environment
+  # AWS Configuration
+  AWS_REGION: ${AWS_REGION:-eu-west-1}
+  AWS_DEFAULT_REGION: ${AWS_REGION:-eu-west-1}
+  
+  # Common settings
+  NODE_ENV: production
+  LC_ALL: C.UTF-8
+  LANG: C.UTF-8
+  NLS_LANG: AMERICAN_AMERICA.AL32UTF8
+
+services:
+  # Node.js API Server (AWS-enabled)
+  api:
+    build: 
+      context: ./api
+      dockerfile: Dockerfile.aws
+    image: ${AWS_ACCOUNT_ID:-811287567672}.dkr.ecr.${AWS_REGION:-eu-west-1}.amazonaws.com/call-analytics-api:latest
+    container_name: call-analytics-api-aws
+    <<: *aws-logs
+    environment:
+      <<: *common-environment
+      # API-specific settings
+      PORT: 3000
+      API_PREFIX: /api/v1
+      
+      # Performance optimizations
+      AUTO_MIGRATE: false  # Don't auto-migrate in production
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_BATCH_SIZE: 1
+      OPENSEARCH_BATCH_TIMEOUT: 5000
+      
+      # CDC Performance (balanced for data integrity)
+      CDC_POLL_INTERVAL_MS: 10000
+      CDC_BATCH_SIZE: 25
+      CDC_MAX_CONCURRENT: 10
+      ENABLE_KAFKA_CDC: true
+      
+      # Rate limiting
+      RATE_LIMIT_WINDOW: 15
+      RATE_LIMIT_MAX_REQUESTS: 100
+      ALLOWED_ORIGINS: https://app.call-analytics.your-domain.com,http://localhost:8080
+      
+      # AWS Services endpoints (will be overridden by secrets)
+      MSK_BOOTSTRAP_SERVERS: ${MSK_BOOTSTRAP_SERVERS:-kafka:29092}
+      
+    # ECS-style secret injection (for compatibility testing)
+    secrets:
+      - source: oracle_config
+        target: /run/secrets/oracle_config
+      - source: redis_config
+        target: /run/secrets/redis_config
+      - source: jwt_config
+        target: /run/secrets/jwt_config
+      - source: opensearch_config
+        target: /run/secrets/opensearch_config
+    
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./logs/api:/app/logs
+      - ./config/call-classifications.json:/app/config/call-classifications.json:ro
+    
+    depends_on:
+      - redis
+      - opensearch
+      - kafka
+    
+    networks:
+      - call-analytics-aws-network
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Flask ML Service (AWS-enabled with GPU support)
+  ml-service:
+    build:
+      context: ./ml-service
+      dockerfile: Dockerfile.aws
+    image: ${AWS_ACCOUNT_ID:-811287567672}.dkr.ecr.${AWS_REGION:-eu-west-1}.amazonaws.com/call-analytics-ml:latest
+    container_name: call-analytics-ml-aws
+    <<: *aws-logs
+    runtime: nvidia
+    environment:
+      <<: *common-environment
+      # GPU Configuration
+      NVIDIA_VISIBLE_DEVICES: all
+      CUDA_VISIBLE_DEVICES: 0
+      CUDA_LAUNCH_BLOCKING: 0
+      CUDA_CACHE_DISABLE: 0
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      
+      # PyTorch optimizations
+      PYTORCH_CUDA_ALLOC_CONF: max_split_size_mb:512
+      OMP_NUM_THREADS: 4
+      
+      # HuggingFace configuration
+      HF_HOME: /app/cache/huggingface
+      TRANSFORMERS_CACHE: /app/cache/huggingface
+      HF_DATASETS_CACHE: /app/cache/huggingface/datasets
+      
+      # Model configuration (overridden by AWS Secrets)
+      MODEL_TEMPERATURE: 0.2
+      MODEL_MAX_TOKENS: 400
+      REQUEST_TIMEOUT: 40
+      OLLAMA_TIMEOUT: 40
+      DEFAULT_MODEL: dictalm2.0-instruct:Q4_K_M
+      HEBREW_MODEL: dictalm2.0-instruct:Q4_K_M
+      
+      # Service configuration
+      ML_SERVICE_PORT: 5000
+      ML_LOG_LEVEL: INFO
+      FLASK_DEBUG: false
+    
+    # ECS-style secret injection
+    secrets:
+      - source: ml_config
+        target: /run/secrets/ml_config
+    
+    ports:
+      - "5000:5000"
+    
+    volumes:
+      - ./data/models:/app/models
+      - ./data/huggingface:/app/cache/huggingface
+      - ./logs/ml:/app/logs
+      - ./config/call-classifications.json:/app/config/call-classifications.json:ro
+      - ./config/prompt-templates.json:/app/config/prompt-templates.json:ro
+    
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    networks:
+      - call-analytics-aws-network
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # Vue.js Frontend (AWS-enabled)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.aws
+      args:
+        - VUE_APP_API_URL=https://api.call-analytics.your-domain.com
+        - VUE_APP_WS_URL=wss://api.call-analytics.your-domain.com
+        - VUE_APP_ENVIRONMENT=production
+    image: ${AWS_ACCOUNT_ID:-811287567672}.dkr.ecr.${AWS_REGION:-eu-west-1}.amazonaws.com/call-analytics-frontend:latest
+    container_name: call-analytics-frontend-aws
+    <<: *aws-logs
+    environment:
+      <<: *common-environment
+      # Frontend-specific configuration
+      VUE_APP_API_URL: https://api.call-analytics.your-domain.com
+      VUE_APP_WS_URL: wss://api.call-analytics.your-domain.com
+      VUE_APP_ENVIRONMENT: production
+    
+    ports:
+      - "8080:8080"
+    
+    depends_on:
+      - api
+    
+    networks:
+      - call-analytics-aws-network
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cache (AWS ElastiCache compatible)
+  redis:
+    image: redis:7-alpine
+    container_name: call-analytics-redis-aws
+    <<: *aws-logs
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-Production_Redis_2024!}
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-Production_Redis_2024!}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data_aws:/data
+    networks:
+      - call-analytics-aws-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD:-Production_Redis_2024!}", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # OpenSearch (AWS OpenSearch Service compatible)
+  opensearch:
+    image: opensearchproject/opensearch:2.11.1
+    container_name: call-analytics-opensearch-aws
+    <<: *aws-logs
+    environment:
+      # Single node configuration
+      cluster.name: call-analytics-opensearch
+      node.name: call-analytics-node-1
+      discovery.type: single-node
+      bootstrap.memory_lock: true
+      "OPENSEARCH_JAVA_OPTS": "-Xms2g -Xmx4g"
+      
+      # Security configuration
+      plugins.security.disabled: false
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: ${OPENSEARCH_ADMIN_PASSWORD:-Production_Search_2024!}
+      
+      # Performance optimizations
+      indices.query.bool.max_clause_count: 10000
+      search.max_buckets: 100000
+    
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    
+    volumes:
+      - opensearch_data_aws:/usr/share/opensearch/data
+      - opensearch_logs_aws:/usr/share/opensearch/logs
+      - ./config/opensearch/opensearch.yml:/usr/share/opensearch/config/opensearch.yml:ro
+      - ./config/opensearch/index-templates.json:/usr/share/opensearch/config/index-templates.json:ro
+    
+    networks:
+      - call-analytics-aws-network
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k -u admin:${OPENSEARCH_ADMIN_PASSWORD:-Production_Search_2024!} https://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Zookeeper for Kafka (AWS MSK compatible)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: call-analytics-zookeeper-aws
+    <<: *aws-logs
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_LOG4J_LOGGERS: "org.apache.zookeeper=WARN"
+      ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: "WARN"
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data_aws:/var/lib/zookeeper/data
+      - zookeeper_logs_aws:/var/lib/zookeeper/log
+    networks:
+      - call-analytics-aws-network
+    restart: unless-stopped
+
+  # Kafka Broker (AWS MSK compatible)
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: call-analytics-kafka-aws
+    <<: *aws-logs
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      # Basic Kafka configuration
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      
+      # Listener configuration
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      
+      # Replication and partitions
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      
+      # Performance optimizations for call analytics
+      KAFKA_LOG_RETENTION_HOURS: 168  # 7 days
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824  # 1GB
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000  # 5 minutes
+      
+      # Hebrew text processing optimizations
+      KAFKA_MESSAGE_MAX_BYTES: 10485760  # 10MB for large conversations
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760
+      KAFKA_FETCH_MESSAGE_MAX_BYTES: 10485760
+      
+      # JVM settings for better performance
+      KAFKA_HEAP_OPTS: "-Xmx2G -Xms2G"
+      KAFKA_JVM_PERFORMANCE_OPTS: "-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35"
+      
+      # Logging
+      KAFKA_LOG4J_LOGGERS: "kafka.controller=WARN,kafka.producer.async.DefaultEventHandler=WARN,state.change.logger=WARN"
+      KAFKA_LOG4J_ROOT_LOGLEVEL: "WARN"
+    
+    volumes:
+      - kafka_data_aws:/var/lib/kafka/data
+      - kafka_logs_aws:/var/lib/kafka/logs
+    
+    networks:
+      - call-analytics-aws-network
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # Schema Registry (AWS MSK compatible)
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.4.0
+    container_name: call-analytics-schema-registry-aws
+    <<: *aws-logs
+    depends_on:
+      - kafka
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC: _schemas
+      SCHEMA_REGISTRY_DEBUG: 'false'
+      SCHEMA_REGISTRY_LOG4J_ROOT_LOGLEVEL: 'WARN'
+    volumes:
+      - schema_registry_data_aws:/var/lib/schema-registry
+    networks:
+      - call-analytics-aws-network
+    restart: unless-stopped
+
+  # Application Load Balancer (for local AWS testing)
+  nginx-lb:
+    image: nginx:alpine
+    container_name: call-analytics-nginx-aws
+    <<: *aws-logs
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro  # SSL certificates for HTTPS
+    depends_on:
+      - api
+      - frontend
+    networks:
+      - call-analytics-aws-network
+    restart: unless-stopped
+    profiles:
+      - loadbalancer
+
+# AWS Secrets Manager secrets (for testing secret injection)
+secrets:
+  oracle_config:
+    external: true
+    name: prod/call-analytics/oracle
+  redis_config:
+    external: true
+    name: prod/call-analytics/redis
+  jwt_config:
+    external: true
+    name: prod/call-analytics/jwt
+  ml_config:
+    external: true
+    name: prod/call-analytics/ml-service
+  opensearch_config:
+    external: true
+    name: prod/call-analytics/opensearch
+
+# Networks
+networks:
+  call-analytics-aws-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# Volumes (EFS compatible for AWS)
+volumes:
+  # Application data
+  redis_data_aws:
+    driver: local
+  opensearch_data_aws:
+    driver: local
+  opensearch_logs_aws:
+    driver: local
+  
+  # Kafka data
+  kafka_data_aws:
+    driver: local
+  kafka_logs_aws:
+    driver: local
+  zookeeper_data_aws:
+    driver: local
+  zookeeper_logs_aws:
+    driver: local
+  schema_registry_data_aws:
+    driver: local

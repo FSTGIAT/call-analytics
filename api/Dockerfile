@@ -29,7 +29,7 @@ ENV PATH=/opt/oracle/instantclient:${PATH}
 COPY package*.json ./
 
 # Install ALL dependencies (including dev dependencies for building)
-RUN npm ci
+RUN npm install
 
 # Copy application files
 COPY . .

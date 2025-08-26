@@ -1,0 +1,73 @@
+# Multi-stage build for Call Analytics Frontend - AWS Production Version
+FROM node:18-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git python3 make g++ curl
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci --silent
+
+# Copy source code
+COPY . .
+
+# Build arguments for AWS deployment
+ARG VUE_APP_API_URL=https://api.call-analytics.your-domain.com
+ARG VUE_APP_WS_URL=wss://api.call-analytics.your-domain.com
+ARG VUE_APP_ENVIRONMENT=production
+
+# Set build environment variables
+ENV VUE_APP_API_URL=$VUE_APP_API_URL
+ENV VUE_APP_WS_URL=$VUE_APP_WS_URL
+ENV VUE_APP_ENVIRONMENT=$VUE_APP_ENVIRONMENT
+ENV NODE_ENV=production
+
+# Build the application
+RUN npm run build
+
+# Production stage with Nginx
+FROM nginx:alpine
+
+# Install AWS CLI and runtime tools
+RUN apk add --no-cache \
+    aws-cli \
+    jq \
+    bash \
+    curl \
+    && rm -rf /var/cache/apk/*
+
+# Copy built application from builder stage
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Copy custom nginx configuration
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# Copy AWS entrypoint script
+COPY entrypoint-aws.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/entrypoint-aws.sh
+
+# Create nginx user directories with proper permissions
+RUN mkdir -p /var/cache/nginx/client_temp \
+             /var/cache/nginx/proxy_temp \
+             /var/cache/nginx/fastcgi_temp \
+             /var/cache/nginx/uwsgi_temp \
+             /var/cache/nginx/scgi_temp \
+    && chown -R nginx:nginx /var/cache/nginx \
+    && chown -R nginx:nginx /usr/share/nginx/html \
+    && chmod 755 /usr/share/nginx/html
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/ || exit 1
+
+# Expose port
+EXPOSE 8080
+
+# Use AWS-aware entrypoint
+ENTRYPOINT ["/usr/local/bin/entrypoint-aws.sh"]
+CMD ["nginx", "-g", "daemon off;"]

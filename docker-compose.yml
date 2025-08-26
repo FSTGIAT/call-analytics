@@ -9,18 +9,34 @@ services:
       - ./config/.env.api
       - ./config/.env.oracle
       - ./config/.env.kafka
+      # - .env.aws  # Temporarily disabled to prevent AWS token issues
     environment:
       - AUTO_MIGRATE=true
       - OPENSEARCH_URL=http://opensearch:9200
+      - REDIS_HOST=redis
+      # Temporarily commented out AWS credentials to force local Oracle config
+      # - AWS_REGION=eu-west-1
+      # - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      # - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      # - AWS_SESSION_TOKEN=IQoJb3JpZ2luX2VjEA0aCWV1LXdlc3QtMSJGMEQCIENmW+5A/vb1k+FgM7PzqmSlwDqNHrnkpS94sD6SQeZuAiB5q5IhSMI6YBpSZHCQ2FeZez68YQWjF+tG5jy10hRMhCqMAwhmEAIaDDgxMTI4NzU2NzY3MiIMgrd/y5nKkCl6jGzqKukCinbHAZp+owddrqMzfpAOGdB+Wl4KA7iuxM4dO1G7iBx+9aI2xvCHgljXeIDCBQfLFfmhKWftfGnV1Hd+cReMQY1KqKflUngZvU1ud/48MsCCKLRrrApMqok3nsp3osmXRCDV+glrk5Ds/49UJuu6A2IekD/fr9EakC7Wod4dUlrCt6kZeYPlB5+vOM44EmIrSTgDvrEDE1RPN381isvltpynpKDJ3QBEZIxnIcabZotpPc8OI6OsmJGT2t6gX9d6rimA87ii7W6JRvh1KWWL9Eapb4DCrAD9F5lXZuBfbnPe+ju5L23szwalnRQVhRSQb/wQpsV9Fa4rYR9fL9z4fJ40FuR7rFjWrsXmuVTBpXpi/aR8JYfJDYtaIPHadA4mdDIWNhARvEJ6+6LjcPAtCGMSmMOtIR+p+mAc2qomo74FkWqc+ITrKCMXQgGM/ufB/WBetk21MLIXcSx0SxUan+csseickGrnqjDMlbPFBjqnAWtJXcCm2IBb5NZzT5iL6TGPrC0t6ONM08toOk7Kva7Tq5YFHZNtvlQdlrE9G6kDGIRaF64XouixyqN9JM2vfIGAy35c8UYPRgN3nIMCrMtrfKhguv9NIG6aDGe2Y2LtuS7qYwMFeVnGHyTG+Jmi+4rn07xrbzo1NLUazVTudsU2viBRpmiA1bKwOPrrnKrWx1HimigJgFGAcu2MR7DuUazZH+fbr1j9
+      # Minimal Oracle config for local development (overridden by AWS Secrets in production)
+      - ORACLE_USER=system
+      - ORACLE_PASSWORD=2288
+      - ORACLE_HOST=oracle
+      - ORACLE_PORT=1521
+      - ORACLE_SERVICE_NAME=XE
+      # Temporarily disable AWS Secrets Manager while debugging authentication
+      - USE_AWS_SECRETS=false
+      - DISABLE_AWS_SECRETS=true
       - OPENSEARCH_BATCH_SIZE=1         # Index immediately, don't wait for batch
       - OPENSEARCH_BATCH_TIMEOUT=5000   # 5 second timeout instead of 30
       # UTF-8 encoding for Hebrew support
       - LC_ALL=C.UTF-8
       - LANG=C.UTF-8
       - NLS_LANG=AMERICAN_AMERICA.AL32UTF8
-      # CDC Performance Optimization (balanced for data integrity)
-      - CDC_POLL_INTERVAL_MS=10000      # Check every 10 seconds to avoid interrupting inserts
-      - CDC_BATCH_SIZE=25               # Process 25 calls at once instead of 10
+      # CDC Performance Optimization (optimized for faster processing)
+      - CDC_POLL_INTERVAL_MS=2000       # Check every 2 seconds for faster response
+      - CDC_BATCH_SIZE=5                # Process 5 calls at once for smaller batches
       - CDC_MAX_CONCURRENT=10           # Process 10 calls concurrently instead of 3
       # Re-enable Kafka CDC with fixed timestamp handling
       - ENABLE_KAFKA_CDC=true
@@ -31,6 +47,7 @@ services:
       # - /app/node_modules  # Commented out for production
       - ./logs/api:/app/logs
       - ./config/call-classifications.json:/app/config/call-classifications.json:ro
+      - ~/.aws:/root/.aws:ro  # Mount AWS credentials directory
     depends_on:
       - oracle
       - redis
@@ -48,6 +65,11 @@ services:
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
+      # AWS Configuration for Secrets Manager (will override env file values)
+      - AWS_REGION=eu-west-1
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
       # Performance optimizations
       - MODEL_TEMPERATURE=0.2
       - MODEL_MAX_TOKENS=400
@@ -55,10 +77,10 @@ services:
       - OLLAMA_TIMEOUT=40
       - DEFAULT_MODEL=dictalm2.0-instruct:Q4_K_M
       - HEBREW_MODEL=dictalm2.0-instruct:Q4_K_M
-      # HuggingFace token (loaded from env file)
-      - HF_TOKEN=${HF_TOKEN}
     env_file:
       - ./config/.env.ml
+      - .env.models
+      - .env.aws
     ports:
       - "5000:5000"
     volumes:
@@ -160,7 +182,7 @@ services:
     image: container-registry.oracle.com/database/express:21.3.0-xe
     container_name: call-analytics-oracle
     environment:
-      - ORACLE_PWD=Call_Analytics_2024!
+      - ORACLE_PWD=2288
       - ORACLE_CHARACTERSET=AL32UTF8
       - ORACLE_EDITION=xe
     ports:
@@ -169,8 +191,6 @@ services:
     volumes:
       - oracle_data:/opt/oracle/oradata
       - ./oracle/init:/docker-entrypoint-initdb.d
-      - ./config/oracle/init-scripts:/opt/oracle/scripts/startup
-      - ./config/oracle/init-db.sql:/opt/oracle/scripts/startup/01-init-db.sql
     deploy:
       resources:
         limits:
@@ -179,7 +199,7 @@ services:
       - call-analytics-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "sqlplus", "-S", "sys/Call_Analytics_2024!@localhost:1521/XE as sysdba", "@/opt/oracle/scripts/health-check.sql"]
+      test: ["CMD", "sqlplus", "-S", "sys/2288@localhost:1521/XE as sysdba", "@/opt/oracle/scripts/health-check.sql"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -208,14 +228,18 @@ services:
       context: ./ollama
       dockerfile: Dockerfile
     container_name: call-analytics-ollama
+    env_file:
+      - .env.models
     ports:
       - "11434:11434"
     volumes:
       - ./data/ollama:/root/.ollama
-      - ./ollama/models:/models
+      - ./ollama:/models  # Mount entire ollama directory including scripts
+      - ./ollama/setup-models.sh:/models/setup-models.sh:ro
     environment:
       - OLLAMA_MODELS=/root/.ollama/models
       - HF_HOME=/root/.cache/huggingface
+      - HF_TOKEN=${HF_TOKEN}  # HuggingFace token for model downloads
       # Performance optimizations (optimized for DictaLM 2.0)
       - OLLAMA_GPU_MEMORY_FRACTION=0.9
       - OLLAMA_NUM_GPU_LAYERS=32

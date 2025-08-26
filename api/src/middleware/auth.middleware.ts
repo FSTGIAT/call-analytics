@@ -2,6 +2,7 @@ import { Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AuthenticatedRequest } from './customer-isolation.middleware';
 import { logger } from '../utils/logger';
+import { secretsService } from '../services/secrets.service';
 
 interface JwtPayload {
   userId: string;
@@ -10,11 +11,11 @@ interface JwtPayload {
   subscriberIds?: string[];
 }
 
-export const authenticateToken = (
+export const authenticateToken = async (
   req: AuthenticatedRequest,
   res: Response,
   next: NextFunction
-): void => {
+): Promise<void> => {
   try {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
@@ -24,9 +25,17 @@ export const authenticateToken = (
       return;
     }
 
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
-      logger.error('JWT_SECRET not configured');
+    // Get JWT secret from AWS Secrets Manager
+    let secret: string;
+    try {
+      const jwtConfig = await secretsService.getSecret('prod/call-analytics/jwt');
+      secret = jwtConfig.jwt_secret;
+      
+      if (!secret) {
+        throw new Error('JWT secret not found in AWS configuration');
+      }
+    } catch (error) {
+      logger.error('Failed to retrieve JWT secret:', error);
       res.status(500).json({ error: 'Authentication configuration error' });
       return;
     }
@@ -78,18 +87,24 @@ export const authorizeRoles = (...allowedRoles: string[]) => {
   };
 };
 
-export const generateToken = (payload: JwtPayload): string => {
-  const secret = process.env.JWT_SECRET;
-  if (!secret) {
-    throw new Error('JWT_SECRET not configured');
-  }
+export const generateToken = async (payload: JwtPayload): Promise<string> => {
+  try {
+    const jwtConfig = await secretsService.getSecret('prod/call-analytics/jwt');
+    const secret = jwtConfig.jwt_secret;
+    const expiresIn = jwtConfig.jwt_expiry || '7d';
+    
+    if (!secret) {
+      throw new Error('JWT_SECRET not found in AWS Secrets Manager');
+    }
 
-  const expiresIn = process.env.JWT_EXPIRY || '7d';
-  
-  return jwt.sign(payload, secret, {
-    expiresIn,
-    issuer: 'call-analytics-platform'
-  } as jwt.SignOptions);
+    return jwt.sign(payload, secret, {
+      expiresIn,
+      issuer: 'call-analytics-platform'
+    } as jwt.SignOptions);
+  } catch (error) {
+    logger.error('Failed to generate JWT token:', error);
+    throw new Error('JWT configuration error');
+  }
 };
 
 export const refreshToken = (

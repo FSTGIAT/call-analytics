@@ -6,6 +6,7 @@ import logging
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from datetime import datetime
+from .aws_secrets_service import aws_secrets_service
 
 logger = logging.getLogger(__name__)
 
@@ -37,17 +38,49 @@ class HuggingFaceService:
     """
     
     def __init__(self):
-        self.config = HuggingFaceConfig(
-            endpoint_url=os.getenv('HF_ENDPOINT_URL', 'https://yatwgywcy7echpom.us-east-1.aws.endpoints.huggingface.cloud'),
-            model_name=os.getenv('HF_MODEL_NAME', 'meta-llama/Llama-3.1-70B-Instruct'),
-            api_token=os.getenv('HF_TOKEN'),
-            temperature=float(os.getenv('MODEL_TEMPERATURE', '0.7')),
-            max_tokens=int(os.getenv('MODEL_MAX_TOKENS', '2048')),
-            timeout=int(os.getenv('REQUEST_TIMEOUT', '60'))
-        )
+        self.config = self._load_config()
         
         if not self.config.api_token:
-            logger.error("HF_TOKEN environment variable is required")
+            logger.error("HuggingFace API token is required but not found")
+    
+    def _load_config(self) -> HuggingFaceConfig:
+        """Load configuration from AWS Secrets Manager or environment variables"""
+        try:
+            # Try to get ML configuration from AWS Secrets Manager
+            ml_config = aws_secrets_service.get_ml_config()
+            
+            if ml_config:
+                logger.info("Loading HuggingFace configuration from AWS Secrets Manager")
+                return HuggingFaceConfig(
+                    endpoint_url=ml_config.get('hf_endpoint_url', 'https://yatwgywcy7echpom.us-east-1.aws.endpoints.huggingface.cloud'),
+                    model_name=ml_config.get('hf_model_name', 'meta-llama/Llama-3.1-70B-Instruct'),
+                    api_token=ml_config.get('hf_token'),
+                    temperature=float(ml_config.get('model_temperature', '0.7')),
+                    max_tokens=int(ml_config.get('model_max_tokens', '2048')),
+                    timeout=int(ml_config.get('request_timeout', '60'))
+                )
+            else:
+                logger.info("Loading HuggingFace configuration from environment variables")
+                return HuggingFaceConfig(
+                    endpoint_url=os.getenv('HF_ENDPOINT_URL', 'https://yatwgywcy7echpom.us-east-1.aws.endpoints.huggingface.cloud'),
+                    model_name=os.getenv('HF_MODEL_NAME', 'meta-llama/Llama-3.1-70B-Instruct'),
+                    api_token=os.getenv('HF_TOKEN'),
+                    temperature=float(os.getenv('MODEL_TEMPERATURE', '0.7')),
+                    max_tokens=int(os.getenv('MODEL_MAX_TOKENS', '2048')),
+                    timeout=int(os.getenv('REQUEST_TIMEOUT', '60'))
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to load ML configuration: {e}")
+            # Fallback to environment variables
+            return HuggingFaceConfig(
+                endpoint_url=os.getenv('HF_ENDPOINT_URL', 'https://yatwgywcy7echpom.us-east-1.aws.endpoints.huggingface.cloud'),
+                model_name=os.getenv('HF_MODEL_NAME', 'meta-llama/Llama-3.1-70B-Instruct'),
+                api_token=os.getenv('HF_TOKEN'),
+                temperature=float(os.getenv('MODEL_TEMPERATURE', '0.7')),
+                max_tokens=int(os.getenv('MODEL_MAX_TOKENS', '2048')),
+                timeout=int(os.getenv('REQUEST_TIMEOUT', '60'))
+            )
             raise ValueError("HuggingFace API token is required")
         
         if not self.config.endpoint_url:

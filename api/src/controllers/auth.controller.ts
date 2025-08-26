@@ -4,6 +4,7 @@ import Joi from 'joi';
 import { generateToken } from '../middleware/auth.middleware';
 import { logger } from '../utils/logger';
 import { oracleService } from '../services/oracle.service';
+import { secretsService } from '../services/secrets.service';
 
 // Validation schemas
 export const loginSchema = Joi.object({
@@ -166,10 +167,24 @@ export class AuthController {
     try {
       const { username, password, adminKey } = req.body;
 
-      // Admin credentials and key validation
-      const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
-      const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123456';
-      const ADMIN_KEY = process.env.ADMIN_KEY || 'call-analytics-admin-key-2025';
+      // Get admin credentials from AWS Secrets Manager only
+      let ADMIN_USERNAME, ADMIN_PASSWORD, ADMIN_KEY;
+      
+      try {
+        const jwtConfig = await secretsService.getSecret('prod/call-analytics/jwt');
+        ADMIN_USERNAME = jwtConfig.admin_username;
+        ADMIN_PASSWORD = jwtConfig.admin_password;
+        ADMIN_KEY = jwtConfig.admin_key;
+        logger.info('Admin credentials loaded from AWS Secrets Manager');
+        
+        if (!ADMIN_USERNAME || !ADMIN_PASSWORD || !ADMIN_KEY) {
+          throw new Error('Missing admin credentials in AWS Secrets Manager');
+        }
+      } catch (error) {
+        logger.error('Failed to load admin credentials from AWS Secrets Manager:', error);
+        res.status(500).json({ error: 'Admin configuration error' });
+        return;
+      }
 
       // Verify admin credentials
       if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD || adminKey !== ADMIN_KEY) {
@@ -179,7 +194,7 @@ export class AuthController {
       }
 
       // Generate JWT token for admin with null customerId for access to all data
-      const token = generateToken({
+      const token = await generateToken({
         userId: 'admin-user',
         customerId: null, // null = access to all customers' data
         role: 'admin',

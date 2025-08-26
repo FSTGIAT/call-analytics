@@ -1,6 +1,7 @@
 import oracledb from 'oracledb';
 import { logger } from '../utils/logger';
 import { CustomerContext } from '../types/customer';
+import { secretsService } from './secrets.service';
 
 export interface OracleConfig {
   user: string;
@@ -15,38 +16,87 @@ export interface OracleConfig {
 
 export class OracleService {
   private pool: oracledb.Pool | null = null;
-  private config: OracleConfig;
+  private config: OracleConfig | null = null;
+  private isInitialized: boolean = false;
 
   constructor() {
-    this.config = {
-      user: process.env.ORACLE_USER!,
-      password: process.env.ORACLE_PASSWORD!,
-      connectString: `${process.env.ORACLE_HOST}:${process.env.ORACLE_PORT}/${process.env.ORACLE_SERVICE_NAME}`,
-      poolMin: parseInt(process.env.ORACLE_POOL_MIN || '5'),
-      poolMax: parseInt(process.env.ORACLE_POOL_MAX || '20'),
-      poolIncrement: parseInt(process.env.ORACLE_POOL_INCREMENT || '5'),
-      poolTimeout: parseInt(process.env.ORACLE_POOL_TIMEOUT || '60')
-    };
-
-    // Initialize Oracle client
+    // Configuration will be loaded asynchronously from AWS Secrets Manager
     this.initializeOracleClient();
   }
 
+  /**
+   * Initialize Oracle configuration from AWS Secrets Manager or environment variables
+   */
+  private async initializeConfig(): Promise<void> {
+    if (this.config) return;
+
+    try {
+      // Try to get configuration from AWS Secrets Manager first
+      if (secretsService.isAWSEnvironment()) {
+        logger.info('Loading Oracle configuration from AWS Secrets Manager...');
+        const oracleConfig = await secretsService.getOracleConfig();
+        
+        this.config = {
+          user: oracleConfig.username,
+          password: oracleConfig.password,
+          connectString: `${oracleConfig.host}:${oracleConfig.port}/${oracleConfig.service_name}`,
+          poolMin: parseInt(oracleConfig.pool_min),
+          poolMax: parseInt(oracleConfig.pool_max),
+          poolIncrement: parseInt(oracleConfig.pool_increment),
+          poolTimeout: parseInt(oracleConfig.pool_timeout)
+        };
+        
+        logger.info('Oracle configuration loaded from AWS Secrets Manager');
+      } else {
+        // Fallback to environment variables for development
+        logger.info('Loading Oracle configuration from environment variables...');
+        this.config = {
+          user: process.env.ORACLE_USER!,
+          password: process.env.ORACLE_PASSWORD!,
+          connectString: `${process.env.ORACLE_HOST}:${process.env.ORACLE_PORT}/${process.env.ORACLE_SERVICE_NAME}`,
+          poolMin: parseInt(process.env.ORACLE_POOL_MIN || '5'),
+          poolMax: parseInt(process.env.ORACLE_POOL_MAX || '20'),
+          poolIncrement: parseInt(process.env.ORACLE_POOL_INCREMENT || '5'),
+          poolTimeout: parseInt(process.env.ORACLE_POOL_TIMEOUT || '60')
+        };
+        
+        logger.info('Oracle configuration loaded from environment variables');
+      }
+      
+    } catch (error) {
+      logger.error('Failed to load Oracle configuration:', error);
+      throw new Error(`Oracle configuration failed: ${error.message}`);
+    }
+  }
+
   private initializeOracleClient(): void {
+    if (this.isInitialized) return;
+    
     try {
       if (process.env.ORACLE_CLIENT_DIR) {
         oracledb.initOracleClient({ libDir: process.env.ORACLE_CLIENT_DIR });
+      } else if (process.env.NODE_ENV === 'production') {
+        // In AWS/production, try common Oracle client paths
+        const commonPaths = ['/opt/oracle/instantclient', '/usr/lib/oracle/client'];
+        for (const path of commonPaths) {
+          try {
+            oracledb.initOracleClient({ libDir: path });
+            break;
+          } catch (e) {
+            // Continue to next path
+          }
+        }
       }
       
       // Set Oracle configuration with UTF-8 support for Hebrew
       oracledb.outFormat = oracledb.OUT_FORMAT_OBJECT;
       oracledb.autoCommit = true;
       oracledb.fetchAsString = [oracledb.CLOB];
-      oracledb.poolTimeout = this.config.poolTimeout;
       
       // Force UTF-8 encoding for Hebrew text support
       process.env.NLS_LANG = 'AMERICAN_AMERICA.AL32UTF8';
       
+      this.isInitialized = true;
       logger.info('Oracle client initialized with UTF-8 encoding for Hebrew support');
     } catch (error) {
       logger.error('Failed to initialize Oracle client:', error);
@@ -55,6 +105,16 @@ export class OracleService {
 
   async connect(): Promise<void> {
     try {
+      // Initialize configuration if not already done
+      await this.initializeConfig();
+      
+      if (!this.config) {
+        throw new Error('Oracle configuration not initialized');
+      }
+
+      // Set pool timeout from config
+      oracledb.poolTimeout = this.config.poolTimeout;
+      
       this.pool = await oracledb.createPool(this.config);
       logger.info('Oracle connection pool created successfully');
       

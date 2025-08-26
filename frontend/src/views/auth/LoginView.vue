@@ -50,9 +50,7 @@
           <!-- Admin Credentials Helper -->
           <div class="demo-info admin-info" v-if="isAdminMode">
             <p><strong>פרטי כניסת מנהל:</strong></p>
-            <p>שם משתמש: admin</p>
-            <p>סיסמה: admin123456</p>
-            <p>מפתח מנהל: call-analytics-admin-key-2025</p>
+            <p>אנא פנה למנהל המערכת לקבלת פרטי הכניסה</p>
           </div>
           
           <!-- Regular Login Fields -->
@@ -247,8 +245,8 @@ const demoLogin = () => {
 // Quick admin demo login
 const demoAdminLogin = () => {
   adminUsername.value = 'admin'
-  adminPassword.value = 'admin123456'
-  adminKey.value = 'call-analytics-admin-key-2025'
+  // Admin credentials are managed via AWS Secrets Manager
+  // Remove hardcoded values for security
   adminLogin()
 }
 </script>

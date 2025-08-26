@@ -19,6 +19,9 @@ from src.services.embedding_service import embedding_service
 # Load environment variables
 load_dotenv('../config/.env.ml')
 
+# Import AWS secrets service
+from src.services.aws_secrets_service import aws_secrets_service
+
 # Configure logging
 logging.basicConfig(
     level=getattr(logging, os.getenv('ML_LOG_LEVEL', 'INFO').upper()),
