@@ -1,7 +1,7 @@
 {
-  "version": "1.0",
-  "lastUpdated": "2025-08-21",
-  "description": "Hebrew and English prompt templates for call analytics",
+  "version": "1.1",
+  "lastUpdated": "2025-08-26", 
+  "description": "Hebrew and English prompt templates for call analytics - Enhanced with comprehensive analysis",
   "templates": {
     "hebrew": {
       "summarize_with_id": "סכם את שיחה מספר {callId}",
@@ -11,6 +11,9 @@
       "extract_action_items": "זהה פעולות נדרשות מהשיחה מספר {callId}:\n{conversation}\n\nרשום את כל הפעולות שהנציג התחייב לבצע.",
       "identify_customer_needs": "זהה את הצרכים והבקשות של הלקוח בשיחה מספר {callId}",
       "generate_followup": "צור המלצות למעקב עבור שיחה מספר {callId} בהתבסס על הסיכום הבא:\n{summary}",
+      "comprehensive_analysis": "בצע ניתוח מקיף לשיחה מספר {callId}:\n\n{conversation}\n\nכלול:\n1. סיכום השיחה\n2. סיווג לקטגוריות\n3. ניתוח רגשות הלקוח\n4. פעולות נדרשות\n5. המלצות למעקב",
+      "billing_inquiry": "נתח שיחת בירור חיוב מספר {callId} וזהה:\n- סוג החיוב המדובר\n- סיבת הפנייה\n- פתרון שניתן\n- שביעות רצון הלקוח",
+      "technical_support": "נתח שיחת תמיכה טכנית מספר {callId} וזהה:\n- הבעיה הטכנית\n- שלבי הפתרון\n- האם הבעיה נפתרה\n- דרגת מורכבות הבעיה",
       "system_prompt": "אתה עוזר AI מומחה בניתוח שיחות שירות בעברית. תמיד ציין את מספר השיחה ({callId}) בתשובותיך. ענה בעברית בלבד."
     },
     "english": {
@@ -21,11 +24,15 @@
       "extract_action_items": "Identify required actions from call ID {callId}:\n{conversation}\n\nList all actions the agent committed to perform.",
       "identify_customer_needs": "Identify customer needs and requests in call ID {callId}",
       "generate_followup": "Generate follow-up recommendations for call ID {callId} based on the following summary:\n{summary}",
+      "comprehensive_analysis": "Perform comprehensive analysis for call ID {callId}:\n\n{conversation}\n\nInclude:\n1. Call summary\n2. Category classification\n3. Customer sentiment analysis\n4. Required actions\n5. Follow-up recommendations",
+      "billing_inquiry": "Analyze billing inquiry call ID {callId} and identify:\n- Type of billing issue\n- Reason for contact\n- Solution provided\n- Customer satisfaction level",
+      "technical_support": "Analyze technical support call ID {callId} and identify:\n- Technical issue\n- Resolution steps\n- Whether issue was resolved\n- Problem complexity level",
       "system_prompt": "You are an AI assistant expert in analyzing customer service calls. Always reference the call ID ({callId}) in your responses."
     },
     "mixed": {
       "auto_detect": "Detect language and use appropriate template",
-      "bilingual_response": "Respond in the same language as the input"
+      "bilingual_response": "Respond in the same language as the input",
+      "hebrew_english_mix": "Handle mixed Hebrew-English conversations with proper language detection per message"
     }
   },
   "placeholders": {

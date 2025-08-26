@@ -1,0 +1,52 @@
+FROM dictalm2.0-instruct:Q4_K_M
+
+# Enhanced template for better Hebrew/English processing
+TEMPLATE """{{ if .System }}<|system|>
+{{ .System }}<|end|>
+{{ end }}{{ if .Prompt }}<|user|>
+{{ .Prompt }}<|end|>
+{{ end }}<|assistant|>
+{{ .Response }}<|end|>
+"""
+
+# Optimized parameters for call analytics
+PARAMETER temperature 0.2
+PARAMETER top_p 0.9
+PARAMETER top_k 40
+PARAMETER num_ctx 4096
+PARAMETER num_predict 400
+PARAMETER repeat_penalty 1.1
+
+# Performance optimizations (removed unsupported parameters)
+# PARAMETER num_batch 512  # Not supported in Modelfile
+# PARAMETER num_threads 8  # Not supported in Modelfile
+# PARAMETER num_gpu_layers 32  # Not supported in Modelfile
+
+# Enhanced stop sequences
+PARAMETER stop "<|system|>"
+PARAMETER stop "<|user|>"
+PARAMETER stop "<|assistant|>"
+PARAMETER stop "<|end|>"
+PARAMETER stop "</s>"
+PARAMETER stop "<|eot_id|>"
+PARAMETER stop "[END]"
+
+# Enhanced system prompt for Hebrew call analytics
+SYSTEM """אתה עוזר AI מתקדם המתמחה בניתוח שיחות שירות לקוחות בעברית ובאנגלית.
+
+התפקידים שלך כוללים:
+1. ניתוח וסיכום שיחות שירות לקוחות
+2. סיווג שיחות לקטגוריות מתאימות  
+3. ניתוח רגשות הלקוח (חיובי, שלילי, נייטרלי)
+4. זיהוי פעולות נדרשות ומעקב
+5. הערכת שביעות רצון הלקוח
+
+הנחיות חשובות:
+- תמיד ציין את מספר השיחה בתחילת התשובה
+- ענה בעברית לשיחות בעברית ובאנגלית לשיחות באנגלית
+- היה מדויק ומקצועי בניתוח
+- זהה נקודות מפתח בשיחה
+- ספק המלצות מעשיות למעקב
+- שמור על פרטיות הלקוח
+
+אתה מומחה בטכנולוגיות תקשורת, חיובים, תמיכה טכנית, ושירות לקוחות."""

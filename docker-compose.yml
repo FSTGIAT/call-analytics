@@ -37,6 +37,11 @@ services:
       # CDC Performance Optimization (optimized for faster processing)
       - CDC_POLL_INTERVAL_MS=2000       # Check every 2 seconds for faster response
       - CDC_BATCH_SIZE=5                # Process 5 calls at once for smaller batches
+      # Kafka Configuration
+      - ENABLE_KAFKA=true
+      - KAFKA_BROKERS=kafka:29092
+      - KAFKA_CLIENT_ID=call-analytics-api
+      - KAFKAJS_NO_PARTITIONER_WARNING=1
       - CDC_MAX_CONCURRENT=10           # Process 10 calls concurrently instead of 3
       # Re-enable Kafka CDC with fixed timestamp handling
       - ENABLE_KAFKA_CDC=true
@@ -56,7 +61,7 @@ services:
       - call-analytics-network
     restart: unless-stopped
 
-  # Flask ML Service
+  # Flask ML Service - Enhanced with optimized resource management
   ml-service:
     build:
       context: ./ml-service
@@ -65,22 +70,21 @@ services:
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      # AWS Configuration for Secrets Manager (will override env file values)
-      - AWS_REGION=eu-west-1
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
-      # Performance optimizations
+      # Performance optimizations (enhanced)
       - MODEL_TEMPERATURE=0.2
       - MODEL_MAX_TOKENS=400
       - REQUEST_TIMEOUT=40
-      - OLLAMA_TIMEOUT=40
+      - OLLAMA_TIMEOUT=15
       - DEFAULT_MODEL=dictalm2.0-instruct:Q4_K_M
       - HEBREW_MODEL=dictalm2.0-instruct:Q4_K_M
+      # CUDA optimizations
+      - CUDA_VISIBLE_DEVICES=0
+      - CUDA_LAUNCH_BLOCKING=0
+      - CUDA_CACHE_DISABLE=0
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
     env_file:
       - ./config/.env.ml
       - .env.models
-      - .env.aws
     ports:
       - "5000:5000"
     volumes:
@@ -94,15 +98,23 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 4G  # Increased for better Hebrew processing
+          cpus: '6.0'
         reservations:
           devices:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+          memory: 2G
     networks:
       - call-analytics-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Vue.js Frontend
   frontend:
@@ -222,7 +234,7 @@ services:
       - dashboards
 
 
-  # Ollama for local LLM (DictaLM 2.0 for Hebrew/English processing)
+  # Ollama for local LLM (DictaLM 2.0 for Hebrew/English processing) - Enhanced with auto-download
   ollama:
     build:
       context: ./ollama
@@ -235,26 +247,31 @@ services:
     volumes:
       - ./data/ollama:/root/.ollama
       - ./ollama:/models  # Mount entire ollama directory including scripts
-      - ./ollama/setup-models.sh:/models/setup-models.sh:ro
+      - ./ollama/init-models.sh:/scripts/init-models.sh:ro
+      - ./ollama/download-dictalm.py:/scripts/download-dictalm.py:ro
+      - ./ollama/monitor-processes.sh:/scripts/monitor-processes.sh:ro
+      - ./ollama/health-check.sh:/scripts/health-check.sh:ro
+      # - ./ollama/Modelfile.dictalm:/scripts/Modelfile.dictalm:ro  # Mount issue - will copy manually
     environment:
       - OLLAMA_MODELS=/root/.ollama/models
       - HF_HOME=/root/.cache/huggingface
-      - HF_TOKEN=${HF_TOKEN}  # HuggingFace token for model downloads
-      # Performance optimizations (optimized for DictaLM 2.0)
+      - HF_TOKEN=${HF_TOKEN}  # HuggingFace token for automated model downloads
+      # Performance optimizations (enhanced for DictaLM 2.0)
       - OLLAMA_GPU_MEMORY_FRACTION=0.9
       - OLLAMA_NUM_GPU_LAYERS=32
       - OLLAMA_FLASH_ATTENTION=1
       - OLLAMA_KEEP_ALIVE=15m
       - OLLAMA_MAX_LOADED_MODELS=1  # Single model for better performance
       - OLLAMA_NUM_PARALLEL=4
-      # - OLLAMA_GPU_OVERHEAD=512MB  # Commented out - invalid format causing warnings
       - OLLAMA_NUM_BATCH=512
       - OLLAMA_NUM_THREADS=8
-      # CUDA optimizations
+      # CUDA optimizations (enhanced)
       - CUDA_VISIBLE_DEVICES=0
       - CUDA_LAUNCH_BLOCKING=0
       - CUDA_CACHE_DISABLE=0
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      # Additional performance tuning
+      - OLLAMA_DEBUG=1
     deploy:
       resources:
         reservations:
@@ -264,15 +281,16 @@ services:
               capabilities: [gpu]
         limits:
           memory: 16G
+          cpus: '8.0'
     networks:
       - call-analytics-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "bash", "/scripts/health-check.sh"]
+      interval: 60s
+      timeout: 30s
       retries: 3
-      start_period: 60s  # Increased for model loading
+      start_period: 180s  # Extended for DictaLM model loading
 
   # Zookeeper for Kafka coordination
   zookeeper:
