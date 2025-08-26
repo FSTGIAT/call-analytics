@@ -85,12 +85,13 @@ data/oracle/*.properties
 *.bak
 .cache/
 
-# Security
+# Security  
 *.pem
 *.key
 *.crt
 *.p12
 secrets/
+set-aws-env.sh
 
 # Package files
 *.jar
