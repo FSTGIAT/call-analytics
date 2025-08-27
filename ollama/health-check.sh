@@ -55,7 +55,7 @@ test_model_functionality() {
     fi
 }
 
-# Check for resource issues
+# Check for resource issues including GPU
 check_resources() {
     log_health "Checking system resources..."
     
@@ -63,11 +63,22 @@ check_resources() {
     local disk_usage=$(df /tmp | awk 'NR==2{print $5}' | sed 's/%//')
     local runner_count=$(ps aux | grep "ollama runner" | grep -v grep | wc -l)
     
-    log_health "Resources - Memory: ${memory_usage}%, Disk: ${disk_usage}%, Runners: $runner_count"
+    # Check GPU status
+    local gpu_status="Not Available"
+    local gpu_memory_usage="N/A"
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        gpu_status=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "Error")
+        gpu_memory_usage=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "N/A")
+        log_health "GPU: $gpu_status, Memory: $gpu_memory_usage"
+    else
+        log_health "⚠️  GPU/nvidia-smi not available"
+    fi
+    
+    log_health "Resources - CPU Memory: ${memory_usage}%, Disk: ${disk_usage}%, Runners: $runner_count"
     
     # Warning thresholds
     if (( $(echo "$memory_usage > 85" | bc -l) )); then
-        log_health "⚠️  High memory usage: ${memory_usage}%"
+        log_health "⚠️  High CPU memory usage: ${memory_usage}%"
     fi
     
     if [[ $disk_usage -gt 90 ]]; then

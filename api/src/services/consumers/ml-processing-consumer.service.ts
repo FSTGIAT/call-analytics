@@ -58,15 +58,15 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
         super({
             groupId: `${process.env.KAFKA_CONSUMER_GROUP_PREFIX || 'call-analytics'}-ml-processing`,
             topics: [process.env.KAFKA_TOPIC_CONVERSATION_ASSEMBLY || 'conversation-assembly'],
-            sessionTimeout: 45000, // Longer timeout for ML processing
-            heartbeatInterval: 15000,
-            maxPollInterval: 600000, // 10 minutes for ML processing
+            sessionTimeout: 60000, // Extended timeout for GPU processing
+            heartbeatInterval: 20000,
+            maxPollInterval: 900000, // 15 minutes for complex GPU processing
             fromBeginning: true
         });
 
         this.config = {
             mlServiceUrl: process.env.ML_SERVICE_URL || 'http://ml-service:5000',
-            timeout: parseInt(process.env.ML_PROCESSING_TIMEOUT || '120000'), // 2 minutes
+            timeout: parseInt(process.env.ML_PROCESSING_TIMEOUT || '180000'), // 3 minutes for GPU processing
             retryAttempts: parseInt(process.env.ML_RETRY_ATTEMPTS || '3'),
             batchSize: parseInt(process.env.ML_BATCH_SIZE || '5'),
             hebrewDetectionThreshold: parseFloat(process.env.HEBREW_DETECTION_THRESHOLD || '0.8')
@@ -154,6 +154,18 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
                     lastProcessed: new Date(),
                     messageId: message.messageId
                 });
+
+                // Memory cleanup: keep only last 1000 processed conversations
+                if (this.processedConversations.size > 1000) {
+                    const entries = Array.from(this.processedConversations.entries());
+                    // Sort by last processed time and remove oldest 100
+                    entries.sort((a, b) => a[1].lastProcessed.getTime() - b[1].lastProcessed.getTime());
+                    const toRemove = entries.slice(0, 100);
+                    toRemove.forEach(([callId]) => {
+                        this.processedConversations.delete(callId);
+                    });
+                    logger.info(`Cleaned up ${toRemove.length} old processed conversation records`);
+                }
 
                 logger.info('ML processing completed successfully', {
                     callId: message.callId,

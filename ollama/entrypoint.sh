@@ -3,15 +3,26 @@
 # Start Ollama server in the background
 ollama serve &
 
-# Start process monitor in background (if scripts are available)
-if [ -f "/scripts/monitor-processes.sh" ]; then
-    echo "Starting process monitor..."
-    chmod +x /scripts/monitor-processes.sh
-    /scripts/monitor-processes.sh monitor &
-    MONITOR_PID=$!
-    echo "Process monitor started with PID: $MONITOR_PID"
+# Setup robust stuck process cleanup with cron
+echo "Setting up stuck process cleanup system..."
+if [ -f "/models/cleanup-stuck-processes.sh" ]; then
+    chmod +x /models/cleanup-stuck-processes.sh
+    
+    # Install cron if not available
+    which cron >/dev/null || (apt-get update && apt-get install -y cron)
+    
+    # Setup cron job to run cleanup every 2 minutes
+    echo "*/2 * * * * /models/cleanup-stuck-processes.sh" | crontab -
+    
+    # Start cron daemon
+    cron
+    
+    echo "✅ Stuck process cleanup system active (runs every 2 minutes)"
+    
+    # Run initial cleanup
+    /models/cleanup-stuck-processes.sh
 else
-    echo "Process monitor script not found, skipping..."
+    echo "⚠️ Cleanup script not found at /models/cleanup-stuck-processes.sh"
 fi
 
 # Run comprehensive model setup

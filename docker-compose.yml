@@ -61,7 +61,7 @@ services:
       - call-analytics-network
     restart: unless-stopped
 
-  # Flask ML Service - Enhanced with optimized resource management
+  # Flask ML Service - Enhanced with optimized resource management and GPU
   ml-service:
     build:
       context: ./ml-service
@@ -70,18 +70,26 @@ services:
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      # Performance optimizations (enhanced)
+      # Performance optimizations (enhanced for Hebrew LLM)
       - MODEL_TEMPERATURE=0.2
-      - MODEL_MAX_TOKENS=400
-      - REQUEST_TIMEOUT=40
-      - OLLAMA_TIMEOUT=15
+      - MODEL_MAX_TOKENS=800
+      - REQUEST_TIMEOUT=120
+      - OLLAMA_TIMEOUT=90
       - DEFAULT_MODEL=dictalm2.0-instruct:Q4_K_M
       - HEBREW_MODEL=dictalm2.0-instruct:Q4_K_M
-      # CUDA optimizations
+      # CUDA optimizations for GPU acceleration
       - CUDA_VISIBLE_DEVICES=0
       - CUDA_LAUNCH_BLOCKING=0
       - CUDA_CACHE_DISABLE=0
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - CUDA_MEMORY_FRACTION=0.8
+      # GPU memory management
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+      - OMP_NUM_THREADS=4
+      # Cache optimizations
+      - ENABLE_INFERENCE_CACHE=true
+      - INFERENCE_CACHE_SIZE=500
+      - INFERENCE_CACHE_TTL=1800
     env_file:
       - ./config/.env.ml
       - .env.models
@@ -98,23 +106,23 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G  # Increased for better Hebrew processing
-          cpus: '6.0'
+          memory: 12G  # Increased for Hebrew LLM processing
+          cpus: '8.0'
         reservations:
           devices:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-          memory: 2G
+          memory: 6G
     networks:
       - call-analytics-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
-      interval: 30s
-      timeout: 10s
+      interval: 45s
+      timeout: 15s
       retries: 3
-      start_period: 60s
+      start_period: 120s
 
   # Vue.js Frontend
   frontend:
@@ -234,12 +242,13 @@ services:
       - dashboards
 
 
-  # Ollama for local LLM (DictaLM 2.0 for Hebrew/English processing) - Enhanced with auto-download
+  # Ollama for local LLM (DictaLM 2.0 for Hebrew/English processing) - GPU Optimized
   ollama:
     build:
       context: ./ollama
       dockerfile: Dockerfile
     container_name: call-analytics-ollama
+    runtime: nvidia
     env_file:
       - .env.models
     ports:
@@ -249,29 +258,33 @@ services:
       - ./ollama:/models  # Mount entire ollama directory including scripts
       - ./ollama/init-models.sh:/scripts/init-models.sh:ro
       - ./ollama/download-dictalm.py:/scripts/download-dictalm.py:ro
-      - ./ollama/monitor-processes.sh:/scripts/monitor-processes.sh:ro
       - ./ollama/health-check.sh:/scripts/health-check.sh:ro
       # - ./ollama/Modelfile.dictalm:/scripts/Modelfile.dictalm:ro  # Mount issue - will copy manually
     environment:
+      - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_MODELS=/root/.ollama/models
       - HF_HOME=/root/.cache/huggingface
       - HF_TOKEN=${HF_TOKEN}  # HuggingFace token for automated model downloads
-      # Performance optimizations (enhanced for DictaLM 2.0)
-      - OLLAMA_GPU_MEMORY_FRACTION=0.9
-      - OLLAMA_NUM_GPU_LAYERS=32
+      # GPU Performance optimizations (enhanced for DictaLM 2.0)
+      - OLLAMA_GPU_MEMORY_FRACTION=0.75
+      - OLLAMA_NUM_GPU_LAYERS=-1  # Use all GPU layers for maximum GPU utilization
       - OLLAMA_FLASH_ATTENTION=1
-      - OLLAMA_KEEP_ALIVE=15m
+      - OLLAMA_KEEP_ALIVE=10m    # Reduced to free GPU memory faster
       - OLLAMA_MAX_LOADED_MODELS=1  # Single model for better performance
-      - OLLAMA_NUM_PARALLEL=4
-      - OLLAMA_NUM_BATCH=512
-      - OLLAMA_NUM_THREADS=8
-      # CUDA optimizations (enhanced)
+      - OLLAMA_NUM_PARALLEL=2      # Increased for better throughput
+      - OLLAMA_NUM_BATCH=1024      # Increased batch size for GPU efficiency
+      - OLLAMA_NUM_THREADS=6       # Optimized for GPU workloads
+      # CUDA optimizations (enhanced for GPU acceleration)
       - CUDA_VISIBLE_DEVICES=0
       - CUDA_LAUNCH_BLOCKING=0
       - CUDA_CACHE_DISABLE=0
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - CUDA_MEMORY_POOL_DISABLE=0
+      # Memory management for GPU
+      - OLLAMA_MAX_VRAM=0          # Let Ollama manage GPU memory automatically
+      - OLLAMA_LOW_VRAM=false      # We have sufficient VRAM
       # Additional performance tuning
-      - OLLAMA_DEBUG=1
+      - OLLAMA_DEBUG=0             # Disable debug for production performance
     deploy:
       resources:
         reservations:
@@ -280,17 +293,20 @@ services:
               count: 1
               capabilities: [gpu]
         limits:
-          memory: 16G
-          cpus: '8.0'
+          memory: 20G     # Increased for GPU model loading and Hebrew processing
+          cpus: '6.0'     # Increased CPU allocation
+    ulimits:
+      nproc: 2000         # Increased process limit
+      nofile: 65536       # File descriptor limit
     networks:
       - call-analytics-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "bash", "/scripts/health-check.sh"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
-      start_period: 180s  # Extended for DictaLM model loading
+      start_period: 240s  # Extended for DictaLM model loading on GPU
 
   # Zookeeper for Kafka coordination
   zookeeper:

@@ -52,6 +52,10 @@ class InferenceCache:
     
     def get(self, prompt: str, model: str, temperature: float, max_tokens: int, classifications_available: bool = False) -> Optional[LLMResponse]:
         """Get cached response if available and valid"""
+        # Periodically clean up expired entries (every 100 requests)
+        if len(self.cache) % 100 == 0:
+            self.cleanup_expired()
+            
         key = self._get_cache_key(prompt, model, temperature, max_tokens, classifications_available)
         
         if key in self.cache:
@@ -84,6 +88,21 @@ class InferenceCache:
         self.cache.clear()
         logger.info("Inference cache cleared")
     
+    def cleanup_expired(self):
+        """Remove expired entries from cache"""
+        current_time = datetime.now()
+        expired_keys = []
+        
+        for key, (response, timestamp) in self.cache.items():
+            if current_time - timestamp > self.ttl:
+                expired_keys.append(key)
+        
+        for key in expired_keys:
+            del self.cache[key]
+            
+        if expired_keys:
+            logger.info(f"Cleaned up {len(expired_keys)} expired cache entries")
+    
     def get_stats(self) -> Dict:
         """Get cache statistics"""
         return {
@@ -103,14 +122,14 @@ class OllamaService:
         # ONLY DictaLM - no other models!
         self.config = OllamaConfig(
             base_url=os.getenv('OLLAMA_BASE_URL', 'http://ollama:11434'),
-            model_name=os.getenv('DEFAULT_MODEL', 'dictalm-fast'),  # Use env variable
+            model_name=os.getenv('DEFAULT_MODEL', 'dictalm2.0-instruct:Q4_K_M'),  # Updated model name
             temperature=float(os.getenv('MODEL_TEMPERATURE', '0.2')),  # Lower for faster, more focused responses
             max_tokens=int(os.getenv('MODEL_MAX_TOKENS', '800')),  # Increased for complex conversations
-            timeout=int(os.getenv('REQUEST_TIMEOUT', '10'))  # Very aggressive timeout
+            timeout=int(os.getenv('REQUEST_TIMEOUT', '120'))  # Increased timeout for GPU processing
         )
         
         # Always use DictaLM for everything
-        self.hebrew_model = os.getenv('HEBREW_MODEL', 'dictalm-fast')
+        self.hebrew_model = os.getenv('HEBREW_MODEL', 'dictalm2.0-instruct:Q4_K_M')
         self.use_dictalm_for_hebrew = True  # Always true - DictaLM is our primary model
         
         # Initialize inference cache
