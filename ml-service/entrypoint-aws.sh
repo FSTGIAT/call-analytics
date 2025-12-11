@@ -54,6 +54,7 @@ if [[ -z "$ECS_CONTAINER_METADATA_URI_V4" ]] && command -v aws >/dev/null 2>&1; 
             export REQUEST_TIMEOUT=$(echo "$ML_JSON" | jq -r '.request_timeout' 2>/dev/null || echo "40")
             export DEFAULT_MODEL=$(echo "$ML_JSON" | jq -r '.default_model' 2>/dev/null || echo "dictalm2.0-instruct:Q4_K_M")
             export HEBREW_MODEL=$(echo "$ML_JSON" | jq -r '.hebrew_model' 2>/dev/null || echo "dictalm2.0-instruct:Q4_K_M")
+            export OLLAMA_BASE_URL=$(echo "$ML_JSON" | jq -r '.ollama_base_url' 2>/dev/null || echo "http://ollama.callanalytics.local:11434")
             echo "✅ ML configuration loaded from AWS Secrets"
             
             # Validate HuggingFace token
@@ -110,6 +111,7 @@ echo "🌍 Environment: ${NODE_ENV:-production}"
 echo "🚪 Port: $ML_SERVICE_PORT"
 echo "🤖 Default Model: ${DEFAULT_MODEL:-'[not set]'}"
 echo "🇮🇱 Hebrew Model: ${HEBREW_MODEL:-'[not set]'}"
+echo "🦙 Ollama URL: ${OLLAMA_BASE_URL:-'[not set]'}"
 echo "🔥 CUDA Device: $CUDA_VISIBLE_DEVICES"
 echo "🧠 HuggingFace Cache: $HF_HOME"
 

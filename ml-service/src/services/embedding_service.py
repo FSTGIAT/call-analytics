@@ -112,11 +112,62 @@ class EmbeddingService:
                 loop = asyncio.get_event_loop()
                 
                 def load_optimized_model():
-                    model = SentenceTransformer(
-                        self.config.model_name, 
-                        device=self.config.device,
-                        trust_remote_code=True
-                    )
+                    # PRIVATE NETWORK ENHANCEMENT: Force offline mode for cached models
+                    cache_folder = os.getenv('HF_HOME', '/app/cache/huggingface')
+                    transformers_cache = os.getenv('TRANSFORMERS_CACHE', '/app/cache/huggingface')
+                    
+                    # Set offline environment variables to prevent internet access attempts
+                    os.environ['HF_HUB_OFFLINE'] = '1'
+                    os.environ['TRANSFORMERS_OFFLINE'] = '1'
+                    
+                    logger.info(f"🔒 Loading model in OFFLINE mode from cache: {cache_folder}")
+                    
+                    try:
+                        # Force offline loading from pre-cached models
+                        model = SentenceTransformer(
+                            self.config.model_name, 
+                            device=self.config.device,
+                            trust_remote_code=True,
+                            cache_folder=cache_folder,
+                            use_auth_token=False  # Disable auth token to prevent online checks
+                        )
+                        logger.info(f"✅ Model loaded successfully from offline cache: {cache_folder}")
+                        
+                        # Verify model is functional
+                        test_embedding = model.encode("test", show_progress_bar=False)
+                        logger.info(f"✅ Model verification successful - embedding dimension: {len(test_embedding)}")
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Failed to load model from cache: {e}")
+                        
+                        # Try alternative cache paths
+                        alt_cache_paths = [
+                            '/app/cache/huggingface',
+                            '/root/.cache/huggingface',
+                            '/home/cache/huggingface',
+                            './cache/huggingface'
+                        ]
+                        
+                        model = None
+                        for alt_path in alt_cache_paths:
+                            if os.path.exists(alt_path):
+                                try:
+                                    logger.info(f"🔄 Trying alternative cache path: {alt_path}")
+                                    model = SentenceTransformer(
+                                        self.config.model_name,
+                                        device=self.config.device,
+                                        trust_remote_code=True,
+                                        cache_folder=alt_path,
+                                        use_auth_token=False
+                                    )
+                                    logger.info(f"✅ Model loaded from alternative cache: {alt_path}")
+                                    break
+                                except Exception as alt_e:
+                                    logger.warning(f"⚠️ Alternative path {alt_path} failed: {alt_e}")
+                                    continue
+                        
+                        if model is None:
+                            raise Exception(f"Failed to load model from any cache location. Available paths checked: {alt_cache_paths}")
                     
                     # Optimize for Hebrew processing
                     if hasattr(model, 'max_seq_length'):

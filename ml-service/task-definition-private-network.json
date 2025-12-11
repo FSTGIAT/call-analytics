@@ -1,0 +1,101 @@
+{
+    "family": "CallAnalytics-ML",
+    "networkMode": "awsvpc", 
+    "requiresCompatibilities": ["EC2"],
+    "cpu": "6144",
+    "memory": "28672",
+    "containerDefinitions": [
+        {
+            "name": "callAnalytics-ml-service",
+            "image": "811287567672.dkr.ecr.us-east-1.amazonaws.com/ml-service:latest",
+            "cpu": 2048,
+            "memory": 7168,
+            "memoryReservation": 6144,
+            "portMappings": [
+                {
+                    "containerPort": 5000,
+                    "hostPort": 5000,
+                    "protocol": "tcp"
+                }
+            ],
+            "essential": true,
+            "environment": [
+                {
+                    "name": "USE_GPU",
+                    "value": "true"
+                },
+                {
+                    "name": "HF_HOME", 
+                    "value": "/app/cache/huggingface"
+                },
+                {
+                    "name": "TRANSFORMERS_CACHE",
+                    "value": "/app/cache/huggingface"
+                },
+                {
+                    "name": "HF_DATASETS_CACHE",
+                    "value": "/app/cache/huggingface/datasets"
+                },
+                {
+                    "name": "HF_HUB_CACHE",
+                    "value": "/app/cache/huggingface/hub"
+                },
+                {
+                    "name": "HF_HUB_OFFLINE",
+                    "value": "1"
+                },
+                {
+                    "name": "TRANSFORMERS_OFFLINE",
+                    "value": "1"
+                },
+                {
+                    "name": "CUDA_VISIBLE_DEVICES",
+                    "value": "0"
+                },
+                {
+                    "name": "PYTORCH_CUDA_ALLOC_CONF",
+                    "value": "max_split_size_mb:512"
+                },
+                {
+                    "name": "ML_SERVICE_PORT",
+                    "value": "5000"
+                },
+                {
+                    "name": "FLASK_ENV",
+                    "value": "production"
+                },
+                {
+                    "name": "OLLAMA_BASE_URL",
+                    "value": "http://ollama:11434"
+                },
+                {
+                    "name": "USE_OLLAMA_FOR_HEBREW",
+                    "value": "true"
+                },
+                {
+                    "name": "HEBREW_MODEL",
+                    "value": "dictalm2.0-instruct:Q4_K_M"
+                },
+                {
+                    "name": "DEFAULT_MODEL",
+                    "value": "dictalm2.0-instruct:Q4_K_M"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/CallAnalytics-ML",
+                    "awslogs-create-group": "true",
+                    "awslogs-region": "eu-west-1",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            },
+            "resourceRequirements": [
+                {
+                    "value": "1",
+                    "type": "GPU"
+                }
+            ]
+        }
+    ]
+}

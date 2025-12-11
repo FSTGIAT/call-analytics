@@ -20,11 +20,14 @@ RUN python -m spacy download en_core_web_sm
 # Copy application files
 COPY . .
 
+# Pre-download ML models for offline deployment
+RUN python download_models.py
+
 # Create necessary directories
 RUN mkdir -p /app/logs /app/models
 
 # Expose port
 EXPOSE 5000
 
-# Run the Flask application
-CMD ["python", "-m", "flask", "run", "--host=0.0.0.0", "--port=5000"]
+# Run the application directly to ensure SQS consumer starts
+CMD ["python", "app.py"]

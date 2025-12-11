@@ -1,0 +1,51 @@
+{
+  "containerDefinitions": [
+    {
+      "name": "ca-api",
+      "image": "320708867194.dkr.ecr.eu-west-1.amazonaws.com/pelephone/call-analytic/api:latest",
+      "cpu": 0,
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "hostPort": 3000,
+          "protocol": "tcp",
+          "name": "ca-api-port",
+          "appProtocol": "http"
+        }
+      ],
+      "essential": true,
+      "environment": [],
+      "environmentFiles": [],
+      "mountPoints": [],
+      "volumesFrom": [],
+      "ulimits": [],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/callAnalytics-API",
+          "awslogs-create-group": "true",
+          "awslogs-region": "eu-west-1",
+          "awslogs-stream-prefix": "ecs"
+        },
+        "secretOptions": []
+      },
+      "systemControls": []
+    }
+  ],
+  "family": "callAnalytics-API",
+  "taskRoleArn": "arn:aws:iam::320708867194:role/ecsTaskExecutionRole",
+  "executionRoleArn": "arn:aws:iam::320708867194:role/ecsTaskExecutionRole",
+  "networkMode": "awsvpc",
+  "volumes": [],
+  "placementConstraints": [],
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "requiresCompatibilities": [
+    "EC2"
+  ],
+  "cpu": "512",
+  "memory": "2048",
+  "enableFaultInjection": false
+}

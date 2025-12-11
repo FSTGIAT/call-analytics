@@ -1,46 +1,25 @@
-FROM dictalm2.0-instruct:Q4_K_M
+FROM /home/roygi/call-analytics-ai-platform_aws/call-analytics/ollama/dictalm2.0-instruct.Q4_K_M.gguf
 
-# Template for chat format (keeping original working template from source)
-TEMPLATE """{{ if .System }}<|im_start|>system
-{{ .System }}<|im_end|>
-{{ end }}{{ if .Prompt }}<|im_start|>user
-{{ .Prompt }}<|im_end|>
-{{ end }}<|im_start|>assistant
-"""
+# Template for DictaLM 2.0-Instruct format (official format from HuggingFace)
+# Note: DictaLM does NOT support system prompts, only user/assistant format
+# IMPORTANT: Ollama adds BOS token automatically - don't include <s>
+TEMPLATE """{{ if .Prompt }}[INST] {{ .Prompt }} [/INST]{{ end }}"""
 
-# Optimized parameters for concise business responses (from source project)
-PARAMETER temperature 0.2
-PARAMETER top_k 15
+# Optimized parameters for Hebrew call center analysis
+PARAMETER temperature 0.5
+PARAMETER top_k 20
 PARAMETER top_p 0.7
-PARAMETER repeat_penalty 1.15
-PARAMETER num_ctx 512         # Reduced from 4096 to prevent resource usage
-PARAMETER num_predict 150     # Reduced from 200 for faster responses
+PARAMETER repeat_penalty 1.1
+PARAMETER num_ctx 4096
+PARAMETER num_predict 3000
 PARAMETER frequency_penalty 0.1
 PARAMETER presence_penalty 0.1
 PARAMETER num_gpu 99
 
-# Stop tokens (keeping original working tokens from source)
-PARAMETER stop <|im_start|>
-PARAMETER stop <|im_end|>
+# Stop tokens for DictaLM format
+PARAMETER stop </s>
+PARAMETER stop [INST]
+PARAMETER stop [/INST]
 
-# System prompt optimized for data analysis (from source project)
-SYSTEM """You are a call center data analyst. Analyze the provided data to answer questions directly.
-
-CORE INSTRUCTIONS:
-- Answer exactly what is asked based on the data provided
-- Hebrew questions → Hebrew responses (brief and direct)
-- English questions → English responses (brief and direct)
-- Use actual data from context, not generic responses
-- Be specific when data is available, clear when data is missing
-
-DATA ANALYSIS:
-- Analyze the provided data to answer questions directly
-- Use the most relevant data from the context for each question
-- Be precise with numbers and customer identifiers from the data
-
-RESPONSE STYLE:
-- Direct and factual
-- 1-2 sentences maximum
-- Focus on answering the specific question
-- Let the data guide your response
-"""
+# Note: System prompts are NOT supported by DictaLM 2.0-Instruct
+# All instructions must be included in the user prompt itself

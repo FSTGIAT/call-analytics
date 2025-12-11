@@ -1,0 +1,61 @@
+{
+    "containerDefinitions": [
+        {
+            "name": "ml-service",
+            "image": "811287567672.dkr.ecr.eu-west-1.amazonaws.com/pelephone/call-analytic/ml-service:sqs-startup-fix",
+            "cpu": 0,
+            "memory": 8192,
+            "portMappings": [
+                {
+                    "containerPort": 5000,
+                    "hostPort": 5000,
+                    "protocol": "tcp",
+                    "name": "ml-service-5000-tcp"
+                }
+            ],
+            "essential": true,
+            "environment": [
+                {
+                    "name": "FLASK_ENV",
+                    "value": "production"
+                },
+                {
+                    "name": "TRANSFORMERS_OFFLINE",
+                    "value": "1"
+                },
+                {
+                    "name": "HF_HUB_OFFLINE",
+                    "value": "1"
+                }
+            ],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/callAnalytics-ML-optimized",
+                    "awslogs-create-group": "true",
+                    "awslogs-region": "eu-west-1",
+                    "awslogs-stream-prefix": "ecs"
+                },
+                "secretOptions": []
+            },
+            "systemControls": []
+        }
+    ],
+    "family": "callAnalytics-ML-optimized",
+    "taskRoleArn": "arn:aws:iam::811287567672:role/ecsTaskExecutionRole",
+    "executionRoleArn": "arn:aws:iam::811287567672:role/ecsTaskExecutionRole",
+    "networkMode": "awsvpc",
+    "volumes": [],
+    "placementConstraints": [],
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "requiresCompatibilities": [
+        "EC2"
+    ],
+    "cpu": "1024",
+    "memory": "8192"
+}

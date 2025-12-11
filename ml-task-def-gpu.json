@@ -1,0 +1,53 @@
+{
+    "family": "CallAnalytics-ML",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": ["EC2"],
+    "cpu": "2048",
+    "memory": "7168",
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "containerDefinitions": [
+        {
+            "name": "ml-service",
+            "image": "320708867194.dkr.ecr.eu-west-1.amazonaws.com/pelephone/call-analytic/ml-service",
+            "cpu": 0,
+            "portMappings": [
+                {
+                    "containerPort": 5000,
+                    "hostPort": 5000,
+                    "protocol": "tcp",
+                    "name": "ml-service-5000-tcp",
+                    "appProtocol": "http"
+                }
+            ],
+            "essential": true,
+            "environment": [
+                {
+                    "name": "USE_GPU",
+                    "value": "true"
+                },
+                {
+                    "name": "EMBEDDING_MODEL",
+                    "value": "imvladikon/sentence-transformers-alephbert"
+                },
+                {
+                    "name": "EMBEDDING_BATCH_SIZE",
+                    "value": "32"
+                }
+            ],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/CallAnalytics-ML",
+                    "awslogs-create-group": "true",
+                    "awslogs-region": "eu-west-1",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            }
+        }
+    ]
+}

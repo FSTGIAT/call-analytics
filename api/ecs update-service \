@@ -1,0 +1,146 @@
+{
+    "events": [
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662800646,
+            "message": "Starting Oracle Net Listener.",
+            "ingestionTime": 1756662805465,
+            "eventId": "39174889516943641733929388732157050993783573665981530112"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662801131,
+            "message": "Oracle Net Listener started.",
+            "ingestionTime": 1756662805465,
+            "eventId": "39174889527759503155216740955801874356018028996382031873"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662801131,
+            "message": "Starting Oracle Database instance XE.",
+            "ingestionTime": 1756662805465,
+            "eventId": "39174889527759503155216740955801874356018028996382031874"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814523,
+            "message": "Oracle Database instance XE started.",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889826411082853938846079361935684770493969246453760"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814584,
+            "message": "The Oracle base remains unchanged with value /opt/oracle",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889827771428311049214090995614499402044021111259137"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814928,
+            "message": "#########################",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835442884659343748451683901585193080379168522242"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814928,
+            "message": "DATABASE IS READY TO USE!",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835442884659343748451683901585193080379168522243"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814929,
+            "message": "#########################",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835465185404542279074825437303465728740674502660"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814939,
+            "message": "The following output is now a tail of the alert.log:",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835688192856527585306240794486192212355734306821"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814942,
+            "message": "QPI: qopiprep.bat file present",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835755095092123177175665401641010157440252248070"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814942,
+            "message": "2025-08-31T17:53:33.178734+00:00",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835755095092123177175665401641010157440252248071"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814942,
+            "message": "XEPDB1(3):SUPLOG: Set PDB SUPLOG SGA at PDB OPEN, old 0x18, new 0x0 (no suplog)",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835755095092123177175665401641010157440252248072"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814942,
+            "message": "XEPDB1(3):Opening pdb with Resource Manager plan: DEFAULT_PLAN",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835755095092123177175665401641010157440252248073"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814942,
+            "message": "2025-08-31T17:53:34.281594+00:00",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835755095092123177175665401641010157440252248074"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814942,
+            "message": "Pluggable database XEPDB1 opened read write",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835755095092123177175665401641010157440252248075"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814942,
+            "message": "Starting background process CJQ0",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835755095092123177175665401641010157440252248076"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814942,
+            "message": "Completed: ALTER DATABASE OPEN",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835755095092123177175665401641010157440252248077"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814942,
+            "message": "2025-08-31T17:53:34.516376+00:00",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835755095092123177175665401641010157440252248078"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662814942,
+            "message": "CJQ0 started with pid=54, OS id=356 ",
+            "ingestionTime": 1756662815485,
+            "eventId": "39174889835755095092123177175665401641010157440252248079"
+        },
+        {
+            "logStreamName": "ecs/callAnalytics-oracle/ba4924d661e640389873f37f80cdfa57",
+            "timestamp": 1756662817981,
+            "message": "2025-08-31T17:53:37.212329+00:00",
+            "ingestionTime": 1756662820464,
+            "eventId": "39174889903527059750457740908811794136371325462615556096"
+        }
+    ],
+    "searchedLogStreams": [],
+    "nextToken": "Bxkq6kVGFtq2y_MoigeqscPOdhXVbhiVtLoAmXb5jCooshMx3hlp_2XhfEmGW4u11kVNI_4QDaKJW5VIzZLu_YTn409Jo6yCYSH-OvzaovlPyfJh1wZq2p4To-AqA_mzLBFGUBg3DEyQn041zIlxuYXRPDyZTsfiYfKlbbg1jQPLjSh6fuXPrBvbqPbUFUYNAfKjo0qG_dHdVUFBZib-wKGueOiwKv9TE7scvtLcG3UOi9gtVQMOj31hDLC1NOCeTAcuSbnCi9Jh8HBeUK_L9tUxx-okpcarTZyw2Zh0w6Y"
+}

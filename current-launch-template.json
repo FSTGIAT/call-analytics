@@ -1,0 +1,19 @@
+{
+    "IamInstanceProfile": {
+        "Arn": "arn:aws:iam::320708867194:instance-profile/ecsInstanceRole"
+    },
+    "NetworkInterfaces": [
+        {
+            "AssociatePublicIpAddress": false,
+            "DeleteOnTermination": true,
+            "DeviceIndex": 0,
+            "Groups": [
+                "sg-09e024f1cabbd508d"
+            ]
+        }
+    ],
+    "ImageId": "ami-001d2bd2c56ea8fa4",
+    "InstanceType": "c5.2xlarge",
+    "KeyName": "callanalytics-keyPair",
+    "UserData": "IyEvYmluL2Jhc2ggCmVjaG8gRUNTX0NMVVNURVI9UGVsZXBob25lLUNhbGxBbmFseXRpY3MgPj4gL2V0Yy9lY3MvZWNzLmNvbmZpZzsKZWNobyBFQ1NfQkFDS0VORF9IT1NUPWh0dHBzOi8vZWNzLmV1LXdlc3QtMS5hbWF6b25hd3MuY29tID4+IC9ldGMvZWNzL2Vjcy5jb25maWc7"
+}

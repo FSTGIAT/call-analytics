@@ -1,0 +1,72 @@
+{
+    "taskDefinition": {
+        "taskDefinitionArn": "arn:aws:ecs:eu-west-1:811287567672:task-definition/callAnalytics-API:9",
+        "containerDefinitions": [
+            {
+                "name": "ca-api",
+                "image": "811287567672.dkr.ecr.eu-west-1.amazonaws.com/pelephone/call-analytic/api:latest",
+                "cpu": 0,
+                "portMappings": [
+                    {
+                        "containerPort": 3000,
+                        "hostPort": 3000,
+                        "protocol": "tcp",
+                        "name": "ca-api-port",
+                        "appProtocol": "http"
+                    }
+                ],
+                "essential": true,
+                "environment": [],
+                "mountPoints": [],
+                "volumesFrom": [],
+                "logConfiguration": {
+                    "logDriver": "awslogs",
+                    "options": {
+                        "awslogs-group": "/ecs/callAnalytics-API",
+                        "awslogs-create-group": "true",
+                        "awslogs-region": "eu-west-1",
+                        "awslogs-stream-prefix": "ecs"
+                    }
+                },
+                "systemControls": []
+            }
+        ],
+        "family": "callAnalytics-API",
+        "networkMode": "awsvpc",
+        "revision": 9,
+        "volumes": [],
+        "status": "ACTIVE",
+        "requiresAttributes": [
+            {
+                "name": "com.amazonaws.ecs.capability.logging-driver.awslogs"
+            },
+            {
+                "name": "com.amazonaws.ecs.capability.ecr-auth"
+            },
+            {
+                "name": "com.amazonaws.ecs.capability.docker-remote-api.1.19"
+            },
+            {
+                "name": "com.amazonaws.ecs.capability.docker-remote-api.1.18"
+            },
+            {
+                "name": "ecs.capability.task-eni"
+            },
+            {
+                "name": "com.amazonaws.ecs.capability.docker-remote-api.1.29"
+            }
+        ],
+        "placementConstraints": [],
+        "compatibilities": [
+            "EC2"
+        ],
+        "requiresCompatibilities": [
+            "EC2"
+        ],
+        "cpu": "512",
+        "memory": "2048",
+        "registeredAt": "2025-09-08T15:12:22.675000+03:00",
+        "registeredBy": "arn:aws:sts::811287567672:assumed-role/AWSReservedSSO_AWSPowerUserAccess_2435108e9683739d/toygiat@pelephone.co.il"
+    },
+    "tags": []
+}

@@ -1,6 +1,6 @@
 import { KafkaConsumerBase, ProcessingContext } from '../kafka-consumer-base.service';
 import { MLProcessingResult, OpenSearchIndexRequest } from '../../types/kafka-messages';
-import { getKafkaProducer } from '../kafka-producer.service';
+import { getKafkaProducer } from '../sqs-producer.service';
 import { openSearchService } from '../opensearch.service';
 import { logger } from '../../utils/logger';
 
@@ -11,6 +11,7 @@ interface IndexingConfig {
     indexPrefix: string;
     vectorFieldName: string;
     enableBulkIndexing: boolean;
+    queueName: string; // Required for SQS consumer compatibility
 }
 
 interface IndexingBatch {
@@ -57,6 +58,8 @@ interface OpenSearchIndexDocument {
         secondary: string[];
         all: string[];
         confidence: number;
+        is_churn?: boolean;    // NEW: true only when primary = "סימני נטישה/איום לעזוב"
+        call_type?: string;    // NEW: "inbound_service" | "outbound_marketing" | "winback" | "unknown"
     };
     conversationMetadata: {
         messageCount: number;
@@ -77,7 +80,7 @@ interface OpenSearchIndexDocument {
 }
 
 export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
-    private config: IndexingConfig;
+    private indexingConfig: IndexingConfig;
     private indexingBatch: IndexingBatch | null = null;
     private batchTimeout: NodeJS.Timeout | null = null;
     protected processingCount = 0;
@@ -85,56 +88,67 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
     constructor() {
         super({
             groupId: `${process.env.KAFKA_CONSUMER_GROUP_PREFIX || 'call-analytics'}-opensearch-indexing`,
-            topics: [process.env.KAFKA_TOPIC_ML_PROCESSING || 'ml-processing-queue'],
+            topics: [process.env.KAFKA_TOPIC_OPENSEARCH_BULK_INDEX || 'opensearch-bulk-index'],
             sessionTimeout: 30000,
             heartbeatInterval: 10000,
             maxPollInterval: 300000,
             fromBeginning: true
         });
 
-        this.config = {
+        this.indexingConfig = {
             batchSize: parseInt(process.env.OPENSEARCH_BATCH_SIZE || '10'),
             batchTimeout: parseInt(process.env.OPENSEARCH_BATCH_TIMEOUT || '30000'), // 30 seconds
             maxRetries: parseInt(process.env.OPENSEARCH_MAX_RETRIES || '3'),
             indexPrefix: process.env.OPENSEARCH_INDEX_PREFIX || 'call-analytics',
             vectorFieldName: process.env.OPENSEARCH_VECTOR_FIELD || 'embedding',
-            enableBulkIndexing: process.env.OPENSEARCH_BULK_INDEXING !== 'false'
+            enableBulkIndexing: process.env.OPENSEARCH_BULK_INDEXING !== 'false',
+            queueName: process.env.KAFKA_TOPIC_OPENSEARCH_BULK_INDEX || 'opensearch-bulk-index'
         };
     }
 
-    protected async processMessage(
-        message: MLProcessingResult, 
+    protected async processKafkaMessage(
+        message: any, 
         context: ProcessingContext
     ): Promise<void> {
         try {
+            // Handle message format from ML service (wrapped in ml_analysis_result)
+            let mlResult: MLProcessingResult;
+            
+            if (message.type === 'ml_analysis_result' && message.document) {
+                mlResult = this.adaptMLServiceMessage(message.document);
+            } else {
+                // Assume it's already in the correct format
+                mlResult = message as MLProcessingResult;
+            }
+
             logger.info('🔍 OpenSearch Consumer: Processing ML result', {
-                callId: message.callId,
-                customerId: message.customerId,
-                language: message.language?.detected || 'unknown',
-                sentiment: message.sentiment?.overall || 'unknown',
+                callId: mlResult.callId,
+                customerId: mlResult.customerId || 'unknown',
+                language: mlResult.language?.detected || (mlResult as any).language || 'unknown',
+                sentiment: (mlResult as any).sentiment || 'unknown',
                 partition: context.partition,
                 offset: context.offset,
-                messageType: typeof message,
-                hasEmbedding: !!message.embedding,
-                hasSummary: !!message.summary
+                messageType: message.type || 'unknown',
+                hasEmbedding: !!(mlResult as any).embedding,
+                hasSummary: !!(mlResult as any).summary
             });
 
             // Create OpenSearch document
-            const document = await this.createIndexDocument(message);
+            const document = await this.createIndexDocument(mlResult);
 
             // Add to batch or process immediately
-            if (this.config.enableBulkIndexing) {
-                await this.addToBatch(document, message.callId);
+            if (this.indexingConfig.enableBulkIndexing) {
+                await this.addToBatch(document, mlResult.callId);
             } else {
-                await this.indexSingleDocument(document, message.callId);
+                await this.indexSingleDocument(document, mlResult.callId);
             }
 
             this.processingCount++;
             
             logger.debug('Document prepared for OpenSearch indexing', {
-                callId: message.callId,
-                indexName: this.getIndexName(message.customerId),
-                embeddingSize: message.embedding.length,
+                callId: mlResult.callId,
+                indexName: this.getIndexName(mlResult.customerId || 'default'),
+                embeddingSize: (mlResult as any).embedding?.length || 0,
                 processingCount: this.processingCount
             });
 
@@ -142,13 +156,74 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
             logger.error('❌ OpenSearch Consumer: Failed to process ML result', {
                 error: error.message,
                 stack: error.stack,
-                callId: message.callId,
-                customerId: message.customerId,
+                callId: (message as any).callId || (message.document as any)?.callId,
+                customerId: (message as any).customerId || (message.document as any)?.customerId,
                 partition: context.partition,
                 offset: context.offset
             });
             throw error;
         }
+    }
+
+    private adaptMLServiceMessage(mlDocument: any): MLProcessingResult {
+        // Convert ML service document format to expected MLProcessingResult format
+        return {
+            callId: mlDocument.callId,
+            customerId: mlDocument.customerId || 'default',
+            subscriberId: mlDocument.subscriberId || mlDocument.callId,
+            conversationText: mlDocument.transcription,
+            embedding: mlDocument.embedding || [],
+            sentiment: {
+                overall: mlDocument.sentiment || 'neutral',
+                score: 0.5,
+                distribution: { neutral: 1.0 }
+            },
+            language: {
+                detected: mlDocument.language || 'hebrew',
+                confidence: 1.0,
+                isHebrew: mlDocument.language === 'hebrew'
+            },
+            entities: {
+                persons: [],
+                locations: [],
+                organizations: [],
+                phoneNumbers: [],
+                emails: []
+            },
+            summary: {
+                text: mlDocument.summary || '',
+                keyPoints: mlDocument.keyPoints || [],
+                actionItems: mlDocument.actionItems || []
+            },
+            topics: {
+                primary: mlDocument.classifications?.[0] || 'general',
+                secondary: mlDocument.classifications?.slice(1) || [],
+                confidence: 0.8
+            },
+            classifications: {
+                primary: mlDocument.main_category || mlDocument.classifications?.[0] || 'general',
+                secondary: mlDocument.secondary_category
+                    ? [mlDocument.secondary_category]
+                    : mlDocument.classifications?.slice(1) || [],
+                all: mlDocument.classifications || [],
+                confidence: 0.8,
+                is_churn: mlDocument.is_churn_signal || false,
+                call_type: mlDocument.call_type || 'unknown'
+            },
+            conversationContext: {
+                messageCount: 1,
+                duration: mlDocument.processingTime || 0,
+                startTime: new Date(mlDocument.timestamp || Date.now()),
+                endTime: new Date(mlDocument.timestamp || Date.now()),
+                participants: {
+                    agent: ['agent'],
+                    customer: ['customer']
+                }
+            },
+            processingMetadata: {
+                processingTime: new Date(mlDocument.timestamp || Date.now())
+            }
+        } as MLProcessingResult;
     }
 
     private async createIndexDocument(mlResult: MLProcessingResult): Promise<OpenSearchIndexDocument> {
@@ -243,7 +318,7 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
         this.indexingBatch.callIds.push(callId);
 
         // Process batch if it's full
-        if (this.indexingBatch.documents.length >= this.config.batchSize) {
+        if (this.indexingBatch.documents.length >= this.indexingConfig.batchSize) {
             await this.processBatch();
         }
     }
@@ -257,7 +332,7 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
             if (this.indexingBatch && this.indexingBatch.documents.length > 0) {
                 await this.processBatch();
             }
-        }, this.config.batchTimeout);
+        }, this.indexingConfig.batchTimeout);
     }
 
     protected async processBatch(): Promise<void> {
@@ -407,7 +482,7 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
     }
 
     private getIndexName(customerId: string): string {
-        return `${this.config.indexPrefix}-${customerId.toLowerCase()}-transcriptions`;
+        return `${this.indexingConfig.indexPrefix}-${customerId.toLowerCase()}-transcriptions`;
     }
 
     private async ensureIndexExists(indexName: string, customerId: string): Promise<void> {
@@ -469,7 +544,7 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
                             }
                         }
                     },
-                    [this.config.vectorFieldName]: {
+                    [this.indexingConfig.vectorFieldName]: {
                         type: 'knn_vector',
                         dimension: 768, // AlephBERT dimension
                         method: {
@@ -495,6 +570,13 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
                     },
                     'topics.primary': { type: 'keyword' },
                     'topics.secondary': { type: 'keyword' },
+                    // Classification fields for Hebrew call categorization
+                    'classifications.primary': { type: 'keyword' },
+                    'classifications.secondary': { type: 'keyword' },
+                    'classifications.all': { type: 'keyword' },
+                    'classifications.confidence': { type: 'float' },
+                    'classifications.is_churn': { type: 'boolean' },  // NEW: true only when primary = abandon
+                    'classifications.call_type': { type: 'keyword' }, // NEW: inbound_service|outbound_marketing|winback
                     'conversationMetadata.duration': { type: 'integer' },
                     'conversationMetadata.messageCount': { type: 'integer' },
                     'conversationMetadata.startTime': { type: 'date' },
@@ -520,7 +602,7 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
                 metadata: {
                     batchSize: callIds.length,
                     processingNode: 'opensearch-indexing-consumer',
-                    indexPrefix: this.config.indexPrefix
+                    indexPrefix: this.indexingConfig.indexPrefix
                 },
                 timestamp: new Date().toISOString()
             };
@@ -596,9 +678,9 @@ export class OpenSearchIndexingConsumerService extends KafkaConsumerBase {
             ...super.getMetrics(),
             processingCount: this.processingCount,
             currentBatchSize: this.indexingBatch?.documents.length || 0,
-            batchTimeout: this.config.batchTimeout,
-            maxBatchSize: this.config.batchSize,
-            bulkIndexingEnabled: this.config.enableBulkIndexing
+            batchTimeout: this.indexingConfig.batchTimeout,
+            maxBatchSize: this.indexingConfig.batchSize,
+            bulkIndexingEnabled: this.indexingConfig.enableBulkIndexing
         };
     }
 }

@@ -1,5 +1,7 @@
 import os
 import logging
+import signal
+import atexit
 import numpy as np
 from datetime import datetime
 from flask import Flask, request, jsonify
@@ -22,12 +24,193 @@ load_dotenv('../config/.env.ml')
 # Import AWS secrets service
 from src.services.aws_secrets_service import aws_secrets_service
 
+# Import SQS consumer and producer services
+from src.services.sqs_consumer_service import create_ml_consumer, SQSConsumerService
+from src.services.sqs_producer_service import get_sqs_producer
+
+# Import CloudWatch metrics service
+from src.services.cloudwatch_metrics_service import cloudwatch_metrics
+
 # Configure logging
 logging.basicConfig(
     level=getattr(logging, os.getenv('ML_LOG_LEVEL', 'INFO').upper()),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Message processor function for SQS
+async def process_sqs_message(message_data):
+    """Process incoming SQS messages for ML processing"""
+    try:
+        logger.info(f"Processing SQS message for call ID: {message_data.get('callId', 'unknown')}")
+        
+        # Extract conversation data
+        call_id = message_data.get('callId', '')
+        messages = message_data.get('messages', [])
+        
+        # Build transcription text from messages
+        transcription_lines = []
+        for msg in messages:
+            # CDC service sends 'channel' (not 'speaker'): 'A' for agent, 'C' for customer
+            channel = msg.get('channel', msg.get('speaker', 'unknown'))
+            text = msg.get('text', '')
+            if text:
+                transcription_lines.append(f"{channel}: {text}")
+        
+        transcription_text = '\n'.join(transcription_lines)
+        
+        if not transcription_text:
+            logger.warning(f"No transcription text found for call {call_id}")
+            return False
+        
+        # Call the LLM orchestrator to generate summary with classifications
+        logger.info(f"Generating summary for call {call_id} with {len(messages)} messages")
+        result = await llm_orchestrator.summarize_call(
+            transcription=transcription_text,
+            call_id=call_id,
+            language='hebrew',  # Default to Hebrew for this deployment
+            prefer_local=True,
+            use_call_id_prompt=True,
+            prompt_template='summarize_with_id'
+        )
+        
+        # Always send results (success or fallback)
+        summary_data = result.get('summary', {}) if result.get('success') else result.get('fallback_summary', {})
+        is_success = result.get('success', False)
+        error_msg = result.get('error', '')
+
+        # Get processing time from metadata
+        processing_time = result.get('metadata', {}).get('processing_time', 0)
+
+        # === CloudWatch Metrics: Phase 1 ===
+        cloudwatch_metrics.put_metric('CallsProcessed', 1)
+        cloudwatch_metrics.put_metric('ProcessingTime', processing_time * 1000, 'Milliseconds')
+
+        if is_success:
+            logger.info(f"✅ Summary generated successfully for call {call_id}")
+            cloudwatch_metrics.put_metric('CallsSuccessful', 1)
+
+            # Sentiment tracking from summary
+            sentiment = summary_data.get('sentiment', 3)
+            if isinstance(sentiment, int):
+                if sentiment >= 4:
+                    cloudwatch_metrics.put_metric('SentimentPositive', 1)
+                elif sentiment <= 2:
+                    cloudwatch_metrics.put_metric('SentimentNegative', 1)
+                else:
+                    cloudwatch_metrics.put_metric('SentimentNeutral', 1)
+            elif isinstance(sentiment, str):
+                # Handle string sentiment values
+                sentiment_lower = sentiment.lower()
+                if sentiment_lower in ['positive', 'חיובי']:
+                    cloudwatch_metrics.put_metric('SentimentPositive', 1)
+                elif sentiment_lower in ['negative', 'שלילי']:
+                    cloudwatch_metrics.put_metric('SentimentNegative', 1)
+                else:
+                    cloudwatch_metrics.put_metric('SentimentNeutral', 1)
+        else:
+            logger.warning(f"⚠️ LLM failed for call {call_id}: {error_msg}, using fallback summary")
+            cloudwatch_metrics.put_metric('CallsFailed', 1)
+
+        # Prepare ML result data (works for both success and fallback)
+        sqs_producer = get_sqs_producer()
+        ml_result = {
+            'callId': call_id,
+            'summary': summary_data.get('summary', 'שגיאה ביצירת סיכום - נדרשת בדיקה ידנית'),
+            'sentiment': {
+                'overall': summary_data.get('sentiment', 'neutral'),
+                'score': 0.8 if is_success else 0.5
+            },
+            'classification': {
+                'primary': summary_data.get('classifications', ['general_inquiry'])[0] if summary_data.get('classifications') else 'general_inquiry',
+                'all': summary_data.get('classifications', [])
+            },
+            'classifications': summary_data.get('classifications', ['requires_manual_review'] if not is_success else []),
+            'confidence': 0.85 if is_success else 0.3,  # Lower confidence for fallback
+            'keyPoints': summary_data.get('key_points', ['LLM processing failed - manual review required'] if not is_success else []),
+            'actionItems': summary_data.get('action_items', ['Manual review required'] if not is_success else []),
+            'processingTime': result.get('metadata', {}).get('processing_time', 0) * 1000 if is_success else 0,
+            'processingError': error_msg if not is_success else None
+        }
+
+        # 1. Send to SQS for CDC service to save to local Oracle database
+        # ONLY send if summarization was successful - don't save failed attempts
+        if is_success:
+            ml_sent = await sqs_producer.send_ml_result(ml_result)
+            if ml_sent:
+                logger.info(f"✅ ML result sent to SQS for CDC → Oracle processing")
+            else:
+                logger.warning(f"⚠️ Failed to send ML result to SQS for call {call_id}")
+
+            # 2. Send to OpenSearch for quick LLM/Dicta retrieval (AWS cloud indexing)
+            # ONLY send successful summaries to OpenSearch too
+            opensearch_sent = await sqs_producer.send_to_opensearch_queue(ml_result)
+            if opensearch_sent:
+                logger.info(f"✅ ML result sent for OpenSearch indexing (for Dicta quick access)")
+
+            # 3. Generate and send embeddings for vector search (3-queue architecture)
+            # Generate embedding from the summary text
+            try:
+                summary_text = summary_data.get('summary', '')
+                if summary_text:
+                    logger.info(f"🔄 Generating AlephBERT embedding for call {call_id}")
+
+                    # Generate embedding using AlephBERT
+                    embedding_results = await embedding_service.generate_batch_embeddings([summary_text])
+
+                    if embedding_results and isinstance(embedding_results, list) and len(embedding_results) > 0:
+                        # Extract the embedding from the EmbeddingResult object
+                        embedding_result = embedding_results[0]  # Get first (and only) result
+                        embedding_vector = embedding_result.embedding  # Get the actual embedding numpy array
+
+                        # Send embedding to dedicated queue
+                        embedding_sent = await sqs_producer.send_embedding(
+                            call_id=call_id,
+                            embedding=embedding_vector.tolist() if hasattr(embedding_vector, 'tolist') else list(embedding_vector),
+                            summary_text=summary_text
+                        )
+
+                        if embedding_sent:
+                            logger.info(f"✅ Embedding sent to queue for call {call_id} (768 dimensions)")
+                        else:
+                            logger.warning(f"⚠️ Failed to send embedding to queue for call {call_id}")
+                    else:
+                        logger.warning(f"⚠️ No embedding generated for call {call_id}")
+                else:
+                    logger.warning(f"⚠️ No summary text available for embedding generation for call {call_id}")
+
+            except Exception as embedding_error:
+                # Don't fail the whole process if embedding fails
+                logger.error(f"❌ Error generating/sending embedding for call {call_id}: {embedding_error}")
+                # Continue - embeddings are optional enhancement
+        else:
+            # LLM failed - retry via SQS
+            logger.warning(f"⚠️ LLM failed for call {call_id} - will retry via SQS: {error_msg}")
+
+            # Get retry count from message to prevent infinite loops
+            retry_count = message_data.get('retryCount', 0)
+            max_retries = 3
+
+            if retry_count >= max_retries:
+                logger.error(f"❌ Max retries ({max_retries}) exceeded for call {call_id} - message will go to DLQ")
+                # Return True to delete from main queue - SQS will send to DLQ
+                return True
+
+            logger.warning(f"❌ LLM failure (attempt {retry_count + 1}/{max_retries}) for call {call_id} - keeping in SQS for retry")
+            return False  # Keep message in SQS for retry
+
+        logger.info(f"Summary: {summary_data.get('summary', 'N/A')[:200]}...")
+        logger.info(f"Classifications: {summary_data.get('classifications', [])}")
+        logger.info(f"Key Points: {summary_data.get('key_points', [])}")
+
+        return True  # Success - delete message from SQS
+            
+    except Exception as e:
+        logger.error(f"Error processing SQS message: {e}")
+        return False
+
+# Create SQS consumer instance
+sqs_consumer = create_ml_consumer(process_sqs_message)
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -56,6 +239,7 @@ try:
     asyncio.get_event_loop().run_until_complete(init_embedding_service())
 except Exception as e:
     logger.warning(f"⚠️ Could not pre-load embedding service: {e}")
+    logger.info("🔄 Service will continue, embeddings will be loaded on first use")
 
 @app.before_request
 def before_request():
@@ -73,6 +257,9 @@ def after_request(response):
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint."""
+    # Check SQS consumer health
+    sqs_health = sqs_consumer.health_check()
+    
     # Use synchronous health check for now
     pipeline_health = {
         'pipeline_status': 'healthy',
@@ -80,7 +267,8 @@ def health_check():
         'components': {
             'embeddings': {'status': 'healthy'},
             'llm': {'status': 'healthy'},
-            'hebrew_support': {'status': 'native', 'note': 'Built into DictaLM and AlephBERT'}
+            'hebrew_support': {'status': 'native', 'note': 'Built into DictaLM and AlephBERT'},
+            'sqs_consumer': sqs_health
         }
     }
     
@@ -979,6 +1167,35 @@ async def analyze_conversation():
         return jsonify({'error': str(e)}), 500
 
 
+def _validate_conversation_quality(text: str) -> str:
+    """
+    Validate conversation quality.
+    Returns: 'good', 'low_quality', or 'empty'
+    """
+    if not text or len(text.strip()) < 100:
+        logger.warning(f"Empty or very short conversation: {len(text) if text else 0} chars")
+        return 'empty'
+
+    # Check for A: and C: markers (agent and customer dialogue)
+    has_agent = 'A:' in text or 'א:' in text
+    has_customer = 'C:' in text or 'ל:' in text
+
+    if not (has_agent and has_customer):
+        logger.warning("Missing dialogue markers (A:/C:) in conversation")
+        return 'low_quality'
+
+    # Check for excessive repetition
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    if len(lines) > 3:
+        unique_lines = len(set(lines))
+        repetition_ratio = unique_lines / len(lines)
+        if repetition_ratio < 0.3:  # >70% repetition
+            logger.warning(f"High repetition detected: {repetition_ratio:.2%} unique lines")
+            return 'low_quality'
+
+    return 'good'
+
+
 @app.route('/pipeline/process-call', methods=['POST'])
 async def process_call_pipeline():
     """Process call pipeline endpoint - matches API service expectations."""
@@ -1002,7 +1219,7 @@ async def process_call_pipeline():
         # Extract call information
         call_id = call_data.get('callId', '')
         transcription_text = call_data.get('transcriptionText', '')
-        
+
         if not transcription_text:
             return jsonify({
                 'success': False,
@@ -1011,7 +1228,16 @@ async def process_call_pipeline():
                 'results': {},
                 'errors': ['No transcription text provided']
             }), 400
-        
+
+        # Validate conversation quality
+        conversation_quality = _validate_conversation_quality(transcription_text)
+        logger.info(f"Conversation quality for call {call_id}: {conversation_quality}")
+
+        # Modify transcription for low-quality conversations
+        if conversation_quality in ['empty', 'low_quality']:
+            # Add context to help model generate appropriate "אין מספיק מידע" response
+            transcription_text = f"{transcription_text}\n\n[Quality: {conversation_quality} - insufficient information for detailed analysis]"
+
         # Use the same simple logic as analyze_conversation - avoid ML pipeline
         result = await llm_orchestrator.summarize_call(
             transcription=transcription_text,
@@ -1045,10 +1271,12 @@ async def process_call_pipeline():
             'success': True,
             'callId': call_id,
             'processingTime': result.get('metadata', {}).get('processing_time', 0),
+            'conversationQuality': conversation_quality,  # Add quality flag
             'results': {
                 'preprocessing': {
                     'language': 'hebrew' if any(ord(c) >= 0x0590 and ord(c) <= 0x05FF for c in transcription_text) else 'english',
-                    'textLength': len(transcription_text)
+                    'textLength': len(transcription_text),
+                    'conversationQuality': conversation_quality  # Also in preprocessing for compatibility
                 },
                 'embedding': embedding,
                 'llmAnalysis': {
@@ -1193,6 +1421,18 @@ async def pre_warm_models():
         logger.error(f"❌ Critical error during model pre-warming: {e}")
         logger.error("⚠️ Service will continue but may experience cold start delays")
 
+
+def shutdown_handler(signum=None, frame=None):
+    """Gracefully shutdown the application and SQS consumer."""
+    logger.info("🛑 Shutdown signal received - cleaning up...")
+    try:
+        sqs_consumer.stop()
+        logger.info("✅ SQS consumer stopped gracefully")
+    except Exception as e:
+        logger.error(f"❌ Error stopping SQS consumer: {e}")
+    logger.info("👋 ML Service shutdown complete")
+
+
 if __name__ == '__main__':
     port = int(os.getenv('ML_SERVICE_PORT', 5000))
     debug = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
@@ -1200,12 +1440,24 @@ if __name__ == '__main__':
     logger.info(f"Starting ML Service on port {port}")
     logger.info("Native Hebrew processing via DictaLM and AlephBERT")
     
+    # Register shutdown handlers for graceful cleanup
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    signal.signal(signal.SIGINT, shutdown_handler)
+    atexit.register(shutdown_handler)
+    
     # Pre-warm models before starting the server
     import asyncio
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(pre_warm_models())
     loop.close()
+    
+    # Start SQS consumer after model pre-warming
+    logger.info("🚀 Starting SQS consumer service...")
+    if sqs_consumer.start():
+        logger.info("✅ SQS consumer started successfully")
+    else:
+        logger.warning("⚠️ SQS consumer failed to start - service will continue with REST-only mode")
     
     logger.info("🔥 All models pre-warmed - starting Flask server...")
     app.run(host='0.0.0.0', port=port, debug=debug)

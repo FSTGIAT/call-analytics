@@ -157,8 +157,8 @@ class LLMOrchestrator:
                         service.generate_response(
                             prompt=prompt,
                             system_prompt=system_prompt,
-                            max_tokens=kwargs.get('max_tokens', 800),  # Increased for complex conversations
-                            temperature=kwargs.get('temperature', 0.3),
+                            max_tokens=kwargs.get('max_tokens', 4000),  # Increased from 3000 for Hebrew JSON
+                            temperature=kwargs.get('temperature', 0.5),  # Better for Hebrew creativity
                             # Removed model_preference - not supported by Ollama service
                             **kwargs
                         ),
@@ -304,11 +304,11 @@ class LLMOrchestrator:
             'success': False,
             'error': 'All LLM services failed',
             'fallback_summary': {
-                'summary': transcription[:200] + "..." if len(transcription) > 200 else transcription,
-                'key_points': ['Call transcription available'],
-                'sentiment': 'neutral',
+                'summary': 'שגיאה ביצירת סיכום - נדרשת בדיקה ידנית',
+                'key_points': ['שגיאה בעיבוד אוטומטי'],
+                'sentiment': 'unknown',
                 'products_mentioned': [],
-                'action_items': ['Manual review required'],
+                'action_items': ['בדיקה ידנית נדרשת'],
                 'customer_satisfaction': 'unknown',
                 'issue_resolved': False
             },

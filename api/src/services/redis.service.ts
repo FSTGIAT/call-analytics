@@ -11,23 +11,62 @@ export class RedisService {
   }
 
   private async initializeConnection() {
+    logger.info('🔴 [REDIS] Starting Redis connection initialization...');
+    
     try {
       let redisConfig;
       
-      if (secretsService.isAWSEnvironment()) {
+      logger.info('🔴 [REDIS] Checking AWS environment...');
+      const isAWS = secretsService.isAWSEnvironment();
+      
+      if (isAWS) {
+        logger.info('🔴 [REDIS] AWS environment detected, loading from Secrets Manager...');
         const redisSecrets = await secretsService.getRedisConfig();
+        
+        logger.info('🔴 [REDIS] Raw secrets received:', {
+          host: redisSecrets.host,
+          port: redisSecrets.port,
+          db: redisSecrets.db,
+          hasPassword: !!redisSecrets.password
+        });
+        
         redisConfig = {
-          host: process.env.REDIS_HOST || 'redis',
-          port: parseInt(process.env.REDIS_PORT || '6379'),
+          host: redisSecrets.host || 'redis.callanalytics.local',
+          port: parseInt(redisSecrets.port || '6379'),
           password: redisSecrets.password,
           db: parseInt(redisSecrets.db || '0'),
           retryStrategy: (times: number) => {
             const delay = Math.min(times * 50, 2000);
+            logger.info(`🔴 [REDIS] Retry attempt ${times}, delay: ${delay}ms`);
             return delay;
           }
         };
+        
+        logger.info('🔴 [REDIS] Final config built from secrets:', {
+          host: redisConfig.host,
+          port: redisConfig.port,
+          db: redisConfig.db,
+          hasPassword: !!redisConfig.password
+        });
+        
         logger.info('Redis configuration loaded from AWS Secrets Manager');
       } else {
+        logger.info('🔴 [REDIS] Local environment detected, using environment variables...');
+        
+        const envVars = {
+          REDIS_HOST: process.env.REDIS_HOST,
+          REDIS_PORT: process.env.REDIS_PORT,
+          REDIS_PASSWORD: process.env.REDIS_PASSWORD,
+          REDIS_DB: process.env.REDIS_DB
+        };
+        
+        logger.info('🔴 [REDIS] Environment variables found:', {
+          REDIS_HOST: envVars.REDIS_HOST || 'undefined',
+          REDIS_PORT: envVars.REDIS_PORT || 'undefined',
+          REDIS_DB: envVars.REDIS_DB || 'undefined',
+          hasPassword: !!envVars.REDIS_PASSWORD
+        });
+        
         redisConfig = {
           host: process.env.REDIS_HOST || 'redis',
           port: parseInt(process.env.REDIS_PORT || '6379'),
@@ -35,36 +74,71 @@ export class RedisService {
           db: parseInt(process.env.REDIS_DB || '0'),
           retryStrategy: (times: number) => {
             const delay = Math.min(times * 50, 2000);
+            logger.info(`🔴 [REDIS] Retry attempt ${times}, delay: ${delay}ms`);
             return delay;
           }
         };
+        
+        logger.info('🔴 [REDIS] Final config built from env vars:', {
+          host: redisConfig.host,
+          port: redisConfig.port,
+          db: redisConfig.db,
+          hasPassword: !!redisConfig.password
+        });
+        
         logger.info('Redis configuration loaded from environment variables (local mode)');
       }
 
+      logger.info('🔴 [REDIS] Creating Redis client with final config...');
       this.client = new Redis(redisConfig);
 
       this.client.on('connect', () => {
         this.isConnected = true;
-        logger.info('Redis connected successfully');
+        logger.info('🔴 [REDIS] ✅ Redis connected successfully to:', redisConfig.host + ':' + redisConfig.port);
       });
 
-      this.client.on('error', (err) => {
+      this.client.on('error', (err: any) => {
         this.isConnected = false;
-        logger.error('Redis connection error:', err);
+        logger.error('🔴 [REDIS] ❌ Redis connection error:', {
+          error: err.message,
+          code: err.code || 'unknown',
+          errno: err.errno || 'unknown',
+          syscall: err.syscall || 'unknown',
+          hostname: err.hostname || 'unknown',
+          attemptedHost: redisConfig.host,
+          attemptedPort: redisConfig.port
+        });
       });
 
       this.client.on('close', () => {
         this.isConnected = false;
-        logger.warn('Redis connection closed');
+        logger.warn('🔴 [REDIS] ⚠️ Redis connection closed');
       });
       
     } catch (error) {
-      logger.error('Failed to initialize Redis connection:', error);
+      logger.error('🔴 [REDIS] ❌ Failed to initialize Redis connection:', error);
+      
       // Fallback to basic connection without password for local development
-      this.client = new Redis({
-        host: process.env.REDIS_HOST || 'redis',
+      // In AWS, use the service discovery hostname
+      const fallbackConfig = {
+        host: process.env.REDIS_HOST || 'redis.callanalytics.local',
         port: parseInt(process.env.REDIS_PORT || '6379'),
         retryStrategy: (times: number) => Math.min(times * 50, 2000)
+      };
+      
+      logger.warn('🔴 [REDIS] Using fallback configuration:', fallbackConfig);
+      this.client = new Redis(fallbackConfig);
+      
+      this.client.on('error', (err: any) => {
+        logger.error('🔴 [REDIS] ❌ Fallback connection error:', {
+          error: err.message,
+          code: err.code || 'unknown',
+          errno: err.errno || 'unknown',
+          syscall: err.syscall || 'unknown',
+          hostname: err.hostname || 'unknown',
+          fallbackHost: fallbackConfig.host,
+          fallbackPort: fallbackConfig.port
+        });
       });
     }
   }

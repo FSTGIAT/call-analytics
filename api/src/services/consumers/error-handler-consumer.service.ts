@@ -1,7 +1,7 @@
 import { KafkaConsumerBase, ProcessingContext } from '../kafka-consumer-base.service';
 import { logger } from '../../utils/logger';
-import { oracleService } from '../oracle.service';
-import { getKafkaProducer } from '../kafka-producer.service';
+// import { oracleService } from '../oracle.service'; // Oracle handled by local CDC
+import { getKafkaProducer } from '../sqs-producer.service';
 
 interface FailedRecord {
     originalTopic: string;
@@ -27,10 +27,11 @@ interface ErrorHandlingConfig {
     enableErrorReprocessing: boolean;
     enableErrorNotifications: boolean;
     errorNotificationThreshold: number;
+    queueName: string; // Required for SQS consumer compatibility
 }
 
 export class ErrorHandlerConsumerService extends KafkaConsumerBase {
-    private config: ErrorHandlingConfig;
+    private handlerConfig: ErrorHandlingConfig;
     private errorMetrics: ErrorMetrics;
     private reprocessingQueue = new Map<string, FailedRecord>();
     private notificationsSent = 0;
@@ -45,13 +46,14 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
             fromBeginning: true
         });
 
-        this.config = {
+        this.handlerConfig = {
             maxRetryAttempts: parseInt(process.env.ERROR_MAX_RETRY_ATTEMPTS || '3'),
             retryDelayMs: parseInt(process.env.ERROR_RETRY_DELAY_MS || '60000'), // 1 minute
             enableErrorLogging: process.env.ERROR_LOGGING !== 'false',
             enableErrorReprocessing: process.env.ERROR_REPROCESSING !== 'false',
             enableErrorNotifications: process.env.ERROR_NOTIFICATIONS === 'true',
-            errorNotificationThreshold: parseInt(process.env.ERROR_NOTIFICATION_THRESHOLD || '10')
+            errorNotificationThreshold: parseInt(process.env.ERROR_NOTIFICATION_THRESHOLD || '10'),
+            queueName: process.env.KAFKA_TOPIC_FAILED_RECORDS || 'failed-records-dlq'
         };
 
         this.errorMetrics = {
@@ -63,7 +65,7 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
         };
     }
 
-    protected async processMessage(
+    protected async processKafkaMessage(
         message: FailedRecord, 
         context: ProcessingContext
     ): Promise<void> {
@@ -80,13 +82,13 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
             this.updateErrorMetrics(message);
 
             // Log error if enabled
-            if (this.config.enableErrorLogging) {
+            if (this.handlerConfig.enableErrorLogging) {
                 await this.logError(message);
             }
 
             // Attempt reprocessing if enabled and within retry limits
-            if (this.config.enableErrorReprocessing && 
-                message.processingAttempts < this.config.maxRetryAttempts) {
+            if (this.handlerConfig.enableErrorReprocessing && 
+                message.processingAttempts < this.handlerConfig.maxRetryAttempts) {
                 
                 await this.attemptReprocessing(message);
             } else {
@@ -95,7 +97,7 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
             }
 
             // Send notifications if threshold reached
-            if (this.config.enableErrorNotifications) {
+            if (this.handlerConfig.enableErrorNotifications) {
                 await this.checkAndSendNotifications();
             }
 
@@ -170,13 +172,10 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
                 )
             `;
 
-            await oracleService.executeQuery(query, {
+            // Oracle logging handled by local CDC service
+            logger.debug('Oracle error logging skipped - handled by CDC service', {
                 originalTopic: failedRecord.originalTopic,
-                errorMessage: failedRecord.error.substring(0, 2000), // Limit length
-                errorType: this.categorizeError(failedRecord.error),
-                processingAttempts: failedRecord.processingAttempts,
-                originalMessage: JSON.stringify(failedRecord.originalMessage).substring(0, 4000),
-                errorTimestamp: failedRecord.timestamp
+                errorType: this.categorizeError(failedRecord.error)
             });
 
             logger.debug('Error logged to Oracle database', {
@@ -198,11 +197,11 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
             logger.info('Attempting to reprocess failed record', {
                 originalTopic: failedRecord.originalTopic,
                 attempt: failedRecord.processingAttempts + 1,
-                maxAttempts: this.config.maxRetryAttempts
+                maxAttempts: this.handlerConfig.maxRetryAttempts
             });
 
             // Wait before retry to avoid overwhelming the system
-            await new Promise(resolve => setTimeout(resolve, this.config.retryDelayMs));
+            await new Promise(resolve => setTimeout(resolve, this.handlerConfig.retryDelayMs));
 
             // Determine reprocessing strategy based on original topic
             const reprocessed = await this.reprocessByTopic(failedRecord);
@@ -221,7 +220,7 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
                     timestamp: new Date().toISOString()
                 };
 
-                if (updatedRecord.processingAttempts < this.config.maxRetryAttempts) {
+                if (updatedRecord.processingAttempts < this.handlerConfig.maxRetryAttempts) {
                     // Send back to DLQ for another attempt
                     const kafkaProducer = getKafkaProducer();
                     await kafkaProducer.sendToDeadLetterQueue(
@@ -248,7 +247,7 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
                 error: `${failedRecord.error}; Reprocess error: ${reprocessError}`
             };
 
-            if (updatedRecord.processingAttempts < this.config.maxRetryAttempts) {
+            if (updatedRecord.processingAttempts < this.handlerConfig.maxRetryAttempts) {
                 const kafkaProducer = getKafkaProducer();
                 await kafkaProducer.sendToDeadLetterQueue(
                     failedRecord.originalTopic,
@@ -342,13 +341,11 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
                 )
             `;
 
-            await oracleService.executeQuery(query, {
+            // Oracle permanent failure logging handled by local CDC service
+            logger.warn('Oracle permanent failure logging skipped - handled by CDC service', {
                 originalTopic: failedRecord.originalTopic,
-                errorMessage: failedRecord.error.substring(0, 2000),
                 errorType: this.categorizeError(failedRecord.error),
-                totalAttempts: failedRecord.processingAttempts,
-                originalMessage: JSON.stringify(failedRecord.originalMessage).substring(0, 4000),
-                firstErrorTimestamp: failedRecord.timestamp
+                totalAttempts: failedRecord.processingAttempts
             });
 
         } catch (logError) {
@@ -361,7 +358,7 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
 
     private async checkAndSendNotifications(): Promise<void> {
         const errorCount = this.errorMetrics.totalErrors;
-        const threshold = this.config.errorNotificationThreshold;
+        const threshold = this.handlerConfig.errorNotificationThreshold;
 
         // Send notification every time we hit the threshold
         if (errorCount > 0 && errorCount % threshold === 0) {
@@ -384,7 +381,7 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
                 errorsByType: Object.fromEntries(this.errorMetrics.errorsByType)
             },
             notificationNumber: this.notificationsSent,
-            threshold: this.config.errorNotificationThreshold
+            threshold: this.handlerConfig.errorNotificationThreshold
         };
 
         logger.warn('Error threshold reached - sending notification', notification);
@@ -404,7 +401,7 @@ export class ErrorHandlerConsumerService extends KafkaConsumerBase {
                 timestamp: notification.timestamp,
                 metadata: {
                     notificationType: 'error-threshold',
-                    threshold: this.config.errorNotificationThreshold,
+                    threshold: this.handlerConfig.errorNotificationThreshold,
                     ...notification.metrics
                 }
             });

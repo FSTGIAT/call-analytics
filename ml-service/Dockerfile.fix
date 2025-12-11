@@ -1,0 +1,5 @@
+# Use existing embedding-fix image as base to avoid Docker Hub issues
+FROM 811287567672.dkr.ecr.eu-west-1.amazonaws.com/pelephone/call-analytic/ml-service:embedding-fix
+
+# Override the CMD to run app.py directly instead of flask run
+CMD ["python", "app.py"]

@@ -8,7 +8,7 @@ services:
     env_file:
       - ./config/.env.api
       - ./config/.env.oracle
-      - ./config/.env.kafka
+      - ./config/.env.sqs
       # - .env.aws  # Temporarily disabled to prevent AWS token issues
     environment:
       - AUTO_MIGRATE=true
@@ -35,16 +35,15 @@ services:
       - LANG=C.UTF-8
       - NLS_LANG=AMERICAN_AMERICA.AL32UTF8
       # CDC Performance Optimization (optimized for faster processing)
-      - CDC_POLL_INTERVAL_MS=2000       # Check every 2 seconds for faster response
+      - CDC_POLL_INTERVAL_MS=10000      # Check every 10 seconds for balanced performance
       - CDC_BATCH_SIZE=5                # Process 5 calls at once for smaller batches
-      # Kafka Configuration
-      - ENABLE_KAFKA=true
-      - KAFKA_BROKERS=kafka:29092
-      - KAFKA_CLIENT_ID=call-analytics-api
-      - KAFKAJS_NO_PARTITIONER_WARNING=1
+      # SQS Configuration (replaces Kafka)
+      - ENABLE_SQS=true
+      - SQS_QUEUE_URL=https://sqs.eu-west-1.amazonaws.com/811287567672/Myque1
+      - AWS_REGION=eu-west-1
       - CDC_MAX_CONCURRENT=10           # Process 10 calls concurrently instead of 3
-      # Re-enable Kafka CDC with fixed timestamp handling
-      - ENABLE_KAFKA_CDC=true
+      # Enable SQS CDC (replaces Kafka CDC)
+      - ENABLE_SQS_CDC=true
     ports:
       - "3000:3000"
     volumes:
@@ -90,6 +89,10 @@ services:
       - ENABLE_INFERENCE_CACHE=true
       - INFERENCE_CACHE_SIZE=500
       - INFERENCE_CACHE_TTL=1800
+      # SQS Configuration (replaces Kafka)
+      - ENABLE_SQS=true
+      - SQS_QUEUE_URL=https://sqs.eu-west-1.amazonaws.com/811287567672/Myque1
+      - AWS_REGION=eu-west-1
     env_file:
       - ./config/.env.ml
       - .env.models
@@ -241,7 +244,6 @@ services:
     profiles:
       - dashboards
 
-
   # Ollama for local LLM (DictaLM 2.0 for Hebrew/English processing) - GPU Optimized
   ollama:
     build:
@@ -308,122 +310,6 @@ services:
       retries: 3
       start_period: 240s  # Extended for DictaLM model loading on GPU
 
-  # Zookeeper for Kafka coordination
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.4.0
-    container_name: call-analytics-zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-      ZOOKEEPER_SYNC_LIMIT: 2
-    ports:
-      - "2181:2181"
-    volumes:
-      - zookeeper_data:/var/lib/zookeeper/data
-      - zookeeper_logs:/var/lib/zookeeper/log
-    networks:
-      - call-analytics-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "2181"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Kafka Broker
-  kafka:
-    image: confluentinc/cp-kafka:7.4.0
-    container_name: call-analytics-kafka
-    depends_on:
-      - zookeeper
-    ports:
-      - "9092:9092"
-      - "9101:9101"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      # Performance optimizations for call analytics
-      KAFKA_NUM_PARTITIONS: 3
-      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
-      KAFKA_LOG_RETENTION_HOURS: 168  # 7 days
-      KAFKA_LOG_SEGMENT_BYTES: 1073741824  # 1GB
-      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000  # 5 minutes
-      # Hebrew text processing optimizations
-      KAFKA_MESSAGE_MAX_BYTES: 10485760  # 10MB for large conversations
-      KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760
-      KAFKA_FETCH_MESSAGE_MAX_BYTES: 10485760
-      # JVM settings for better performance
-      KAFKA_HEAP_OPTS: "-Xmx1G -Xms1G"
-      KAFKA_JVM_PERFORMANCE_OPTS: "-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35"
-    volumes:
-      - kafka_data:/var/lib/kafka/data
-      - kafka_logs:/var/lib/kafka/logs
-    networks:
-      - call-analytics-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 40s
-
-  # Schema Registry for Kafka message schemas
-  schema-registry:
-    image: confluentinc/cp-schema-registry:7.4.0
-    container_name: call-analytics-schema-registry
-    depends_on:
-      - kafka
-    ports:
-      - "8081:8081"
-    environment:
-      SCHEMA_REGISTRY_HOST_NAME: schema-registry
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
-      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
-      SCHEMA_REGISTRY_KAFKASTORE_TOPIC: _schemas
-      SCHEMA_REGISTRY_DEBUG: 'true'
-    volumes:
-      - schema_registry_data:/var/lib/schema-registry
-    networks:
-      - call-analytics-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Kafka UI for monitoring and management
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    container_name: call-analytics-kafka-ui
-    depends_on:
-      - kafka
-      - schema-registry
-    ports:
-      - "8090:8080"
-    environment:
-      KAFKA_CLUSTERS_0_NAME: call-analytics-cluster
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
-      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
-      DYNAMIC_CONFIG_ENABLED: 'true'
-      AUTH_TYPE: "DISABLED"
-    networks:
-      - call-analytics-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
 networks:
   call-analytics-network:
     driver: bridge
@@ -434,9 +320,3 @@ volumes:
   opensearch_data:
   opensearch_logs:
   ollama_models:
-  # Kafka and Zookeeper data volumes
-  kafka_data:
-  kafka_logs:
-  zookeeper_data:
-  zookeeper_logs:
-  schema_registry_data:

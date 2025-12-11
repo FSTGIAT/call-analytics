@@ -1,76 +1,65 @@
-# Multi-stage build for Call Analytics ML Service - AWS Production Version
-FROM python:3.11-slim AS builder
+# AWS-enabled Call Analytics ML Service with GPU support
+FROM python:3.10-slim
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set working directory
 WORKDIR /app
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
-
-# Production stage with CUDA support
-FROM nvidia/cuda:11.8-runtime-ubuntu22.04
-
-# Install Python, runtime dependencies, and AWS CLI
+# Install system dependencies including AWS CLI and jq
 RUN apt-get update && apt-get install -y \
-    python3.11 \
-    python3-pip \
-    python3.11-distutils \
+    build-essential \
     curl \
     jq \
     bash \
     awscli \
-    && rm -rf /var/lib/apt/lists/* \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+    && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
+# Copy requirements file
+COPY requirements.txt .
 
-# Copy Python packages from builder
-COPY --from=builder /root/.local /home/appuser/.local
+# Install Python dependencies
+# Install torch first without hash checking to avoid version conflicts
+RUN pip install --no-cache-dir --force-reinstall torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --extra-index-url https://download.pytorch.org/whl/cpu
+# Now install other requirements, allowing pip to skip torch since it's already installed
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Make sure scripts in .local are usable:
-ENV PATH=/home/appuser/.local/bin:$PATH
+# Install Hebrew language model for spaCy
+RUN python -m spacy download en_core_web_sm
 
-# Create app user (non-root for security)
-RUN useradd --create-home --shell /bin/bash appuser && \
-    chown -R appuser:appuser /app
+# Copy all application files
+COPY . .
 
-# Copy application code
-COPY --chown=appuser:appuser . .
+# Pre-download ALL ML models during build (private network compatible)
+RUN python3 download_models.py
 
-# Copy AWS entrypoint script
-COPY --chown=appuser:appuser entrypoint-aws.sh /usr/local/bin/
+# Copy AWS entrypoint script and make it executable
+COPY entrypoint-aws.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/entrypoint-aws.sh
 
 # Create necessary directories
-RUN mkdir -p /app/logs /app/models /app/cache && \
-    chown -R appuser:appuser /app
+RUN mkdir -p /app/logs /app/models /app/cache
 
-# Switch to app user
-USER appuser
+# Create cache directories for HuggingFace
+RUN mkdir -p /app/cache/huggingface /app/cache/huggingface/datasets
 
-# Set Python path
-ENV PYTHONPATH=/app:$PYTHONPATH
-
-# CUDA/PyTorch optimizations
-ENV CUDA_VISIBLE_DEVICES=0
-ENV PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
-
-# HuggingFace cache directory
+# Set environment variables for HuggingFace caching
 ENV HF_HOME=/app/cache/huggingface
 ENV TRANSFORMERS_CACHE=/app/cache/huggingface
 ENV HF_DATASETS_CACHE=/app/cache/huggingface/datasets
 
+# GPU/CUDA environment variables
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV CUDA_VISIBLE_DEVICES=0
+ENV USE_GPU=true
+ENV PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+
+# CloudWatch Metrics environment variables
+ENV ENABLE_CLOUDWATCH_METRICS=true
+ENV CLOUDWATCH_NAMESPACE=CallAnalytics/MLService
+ENV METRICS_FLUSH_INTERVAL=60
+ENV ENVIRONMENT=prod
+
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:5000/health || exit 1
 
 # Expose port

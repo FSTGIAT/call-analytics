@@ -1,0 +1,32 @@
+{
+  "Version": "2012-10-17",
+  "Id": "__default_policy_ID",
+  "Statement": [
+    {
+      "Sid": "__owner_statement",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::320708867194:root"
+      },
+      "Action": "SQS:*",
+      "Resource": "arn:aws:sqs:eu-west-1:320708867194:embedding-pipe-queue-dlq"
+    },
+    {
+      "Sid": "AllowECSRoles",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": [
+          "arn:aws:iam::320708867194:role/ecsInstanceRole",
+          "arn:aws:iam::320708867194:role/ecsTaskExecutionRole"
+        ]
+      },
+      "Action": [
+        "SQS:SendMessage",
+        "SQS:ReceiveMessage",
+        "SQS:DeleteMessage",
+        "SQS:GetQueueAttributes"
+      ],
+      "Resource": "arn:aws:sqs:eu-west-1:320708867194:embedding-pipe-queue-dlq"
+    }
+  ]
+}

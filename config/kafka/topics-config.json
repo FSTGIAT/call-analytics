@@ -60,6 +60,18 @@
       },
       "description": "Dead letter queue for failed message processing"
     },
+    "opensearch-bulk-index": {
+      "partitions": 2,
+      "replication": 1,
+      "config": {
+        "retention.ms": 86400000,
+        "compression.type": "gzip",
+        "max.message.bytes": 20971520,
+        "segment.bytes": 536870912,
+        "cleanup.policy": "delete"
+      },
+      "description": "ML-processed conversations ready for OpenSearch indexing"
+    },
     "processing-metrics": {
       "partitions": 1,
       "replication": 1,
@@ -97,6 +109,13 @@
     },
     "call-analytics-error-handler": {
       "consumers": 1,
+      "session_timeout_ms": 30000,
+      "heartbeat_interval_ms": 3000,
+      "max_poll_interval_ms": 300000,
+      "auto_offset_reset": "earliest"
+    },
+    "call-analytics-opensearch-indexing": {
+      "consumers": 2,
       "session_timeout_ms": 30000,
       "heartbeat_interval_ms": 3000,
       "max_poll_interval_ms": 300000,

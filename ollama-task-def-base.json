@@ -1,0 +1,90 @@
+{
+    "taskDefinitionArn": "arn:aws:ecs:eu-west-1:320708867194:task-definition/callAnalytics-Ollama-minimal:1",
+    "containerDefinitions": [
+        {
+            "name": "callAnalytics-ollama",
+            "image": "320708867194.dkr.ecr.eu-west-1.amazonaws.com/pelephone/call-analytic/ollama",
+            "cpu": 0,
+            "portMappings": [
+                {
+                    "containerPort": 11434,
+                    "hostPort": 11434,
+                    "protocol": "tcp",
+                    "name": "ollama-service-11434-tcp",
+                    "appProtocol": "http"
+                }
+            ],
+            "essential": true,
+            "environment": [],
+            "environmentFiles": [],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "ulimits": [],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/callAnalytics-Ollama-minimal",
+                    "awslogs-create-group": "true",
+                    "awslogs-region": "eu-west-1",
+                    "awslogs-stream-prefix": "ecs"
+                },
+                "secretOptions": []
+            },
+            "systemControls": []
+        }
+    ],
+    "family": "callAnalytics-Ollama-minimal",
+    "taskRoleArn": "arn:aws:iam::320708867194:role/ecsTaskExecutionRole",
+    "executionRoleArn": "arn:aws:iam::320708867194:role/ecsTaskExecutionRole",
+    "networkMode": "awsvpc",
+    "revision": 1,
+    "volumes": [],
+    "status": "ACTIVE",
+    "requiresAttributes": [
+        {
+            "name": "com.amazonaws.ecs.capability.logging-driver.awslogs"
+        },
+        {
+            "name": "ecs.capability.execution-role-awslogs"
+        },
+        {
+            "name": "com.amazonaws.ecs.capability.ecr-auth"
+        },
+        {
+            "name": "com.amazonaws.ecs.capability.docker-remote-api.1.19"
+        },
+        {
+            "name": "com.amazonaws.ecs.capability.task-iam-role"
+        },
+        {
+            "name": "ecs.capability.execution-role-ecr-pull"
+        },
+        {
+            "name": "com.amazonaws.ecs.capability.docker-remote-api.1.18"
+        },
+        {
+            "name": "ecs.capability.task-eni"
+        },
+        {
+            "name": "com.amazonaws.ecs.capability.docker-remote-api.1.29"
+        }
+    ],
+    "placementConstraints": [],
+    "compatibilities": [
+        "EC2",
+        "MANAGED_INSTANCES",
+        "FARGATE"
+    ],
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "requiresCompatibilities": [
+        "EC2"
+    ],
+    "cpu": "2048",
+    "memory": "8192",
+    "registeredAt": "2025-10-15T15:36:27.864000+03:00",
+    "registeredBy": "arn:aws:sts::320708867194:assumed-role/AWSReservedSSO_AWSAdministratorAccess_23a48c73e0c7cbd3/idotrabi@pelephone.co.il",
+    "enableFaultInjection": false
+}

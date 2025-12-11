@@ -1,0 +1,55 @@
+{
+    "family": "callAnalytics-Kafka",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": [
+        "EC2"
+    ],
+    "cpu": "1024",
+    "memory": "3072",
+    "executionRoleArn": "arn:aws:iam::811287567672:role/ecsTaskExecutionRole",
+    "taskRoleArn": "arn:aws:iam::811287567672:role/ecsTaskExecutionRole",
+    "containerDefinitions": [
+        {
+            "name": "kafka",
+            "image": "811287567672.dkr.ecr.eu-west-1.amazonaws.com/pelephone/call-analytic/kafka:latest",
+            "cpu": 0,
+            "portMappings": [
+                {
+                    "containerPort": 29092,
+                    "hostPort": 29092,
+                    "protocol": "tcp",
+                    "name": "kafka-29092-tcp"
+                },
+                {
+                    "containerPort": 9101,
+                    "hostPort": 9101,
+                    "protocol": "tcp",
+                    "name": "kafka-9101-tcp"
+                }
+            ],
+            "essential": true,
+            "environment": [
+                {
+                    "name": "AWS_DEFAULT_REGION",
+                    "value": "eu-west-1"
+                }
+            ],
+            "entryPoint": ["/usr/local/bin/entrypoint-kafka.sh"],
+            "environmentFiles": [],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "ulimits": [],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/callAnalytics-Kafka",
+                    "awslogs-create-group": "true",
+                    "awslogs-region": "eu-west-1",
+                    "awslogs-stream-prefix": "ecs"
+                },
+                "secretOptions": []
+            },
+            "systemControls": []
+        }
+    ]
+}

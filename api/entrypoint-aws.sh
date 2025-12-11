@@ -65,7 +65,7 @@ if [[ -z "$ECS_CONTAINER_METADATA_URI_V4" ]] && command -v aws >/dev/null 2>&1; 
         REDIS_JSON=$(get_secret "prod/call-analytics/redis")
         
         if [[ -n "$REDIS_JSON" ]]; then
-            export REDIS_HOST=$(echo "$REDIS_JSON" | jq -r '.host' 2>/dev/null || echo "redis")
+            export REDIS_HOST=$(echo "$REDIS_JSON" | jq -r '.host' 2>/dev/null || echo "redis.callanalytics.local")
             export REDIS_PORT=$(echo "$REDIS_JSON" | jq -r '.port' 2>/dev/null || echo "6379")
             export REDIS_PASSWORD=$(echo "$REDIS_JSON" | jq -r '.password' 2>/dev/null || echo "")
             export REDIS_DB=$(echo "$REDIS_JSON" | jq -r '.db' 2>/dev/null || echo "0")
@@ -95,11 +95,11 @@ if [[ -z "$ECS_CONTAINER_METADATA_URI_V4" ]] && command -v aws >/dev/null 2>&1; 
         OPENSEARCH_JSON=$(get_secret "prod/call-analytics/opensearch")
         
         if [[ -n "$OPENSEARCH_JSON" ]]; then
-            export OPENSEARCH_HOST=$(echo "$OPENSEARCH_JSON" | jq -r '.host' 2>/dev/null || echo "opensearch")
+            export OPENSEARCH_HOST=$(echo "$OPENSEARCH_JSON" | jq -r '.host' 2>/dev/null || echo "opensearch.callanalytics.local")
             export OPENSEARCH_PORT=$(echo "$OPENSEARCH_JSON" | jq -r '.port' 2>/dev/null || echo "9200")
             export OPENSEARCH_USERNAME=$(echo "$OPENSEARCH_JSON" | jq -r '.username' 2>/dev/null || echo "admin")
             export OPENSEARCH_PASSWORD=$(echo "$OPENSEARCH_JSON" | jq -r '.password' 2>/dev/null || echo "")
-            export OPENSEARCH_URL=$(echo "$OPENSEARCH_JSON" | jq -r '.url' 2>/dev/null || echo "http://opensearch:9200")
+            export OPENSEARCH_URL=$(echo "$OPENSEARCH_JSON" | jq -r '.url' 2>/dev/null || echo "http://opensearch.callanalytics.local:9200")
             echo "✅ OpenSearch configuration loaded from AWS Secrets"
         else
             echo "⚠️  Failed to load OpenSearch secrets, using environment variables"
@@ -110,9 +110,9 @@ if [[ -z "$ECS_CONTAINER_METADATA_URI_V4" ]] && command -v aws >/dev/null 2>&1; 
         KAFKA_JSON=$(get_secret "prod/call-analytics/kafka")
         
         if [[ -n "$KAFKA_JSON" ]]; then
-            export KAFKA_BROKERS=$(echo "$KAFKA_JSON" | jq -r '.brokers' 2>/dev/null || echo "kafka:29092")
-            export KAFKA_BOOTSTRAP_SERVERS=$(echo "$KAFKA_JSON" | jq -r '.bootstrap_servers' 2>/dev/null || echo "kafka:29092")
-            export KAFKA_SCHEMA_REGISTRY=$(echo "$KAFKA_JSON" | jq -r '.schema_registry' 2>/dev/null || echo "http://schema-registry:8081")
+            export KAFKA_BROKERS=$(echo "$KAFKA_JSON" | jq -r '.brokers' 2>/dev/null || echo "kafka.callanalytics.local:29092")
+            export KAFKA_BOOTSTRAP_SERVERS=$(echo "$KAFKA_JSON" | jq -r '.bootstrap_servers' 2>/dev/null || echo "kafka.callanalytics.local:29092")
+            export KAFKA_SCHEMA_REGISTRY=$(echo "$KAFKA_JSON" | jq -r '.schema_registry' 2>/dev/null || echo "http://schema-registry.callanalytics.local:8081")
             echo "✅ Kafka configuration loaded from AWS Secrets"
         else
             echo "⚠️  Failed to load Kafka secrets, using environment variables"
@@ -137,12 +137,21 @@ export LC_ALL=C.UTF-8
 export LANG=C.UTF-8
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
+# Set ML Service URL for Service Discovery
+export ML_SERVICE_URL="${ML_SERVICE_URL:-http://ml-service-optimized.callanalytics.local:5000}"
+
 # Log startup information
 echo "🌍 Environment: $NODE_ENV"
 echo "🚪 Port: $PORT"
 echo "🗄️  Oracle Host: ${ORACLE_HOST:-'[using environment]'}"
 echo "🔴 Redis Host: ${REDIS_HOST:-'[using environment]'}"
 echo "🔍 OpenSearch URL: ${OPENSEARCH_URL:-'[using environment]'}"
+echo "🤖 ML Service URL: ${ML_SERVICE_URL:-'[using environment]'}"
+
+# Note: Kafka topics are automatically created by the Node.js application
+# The KafkaProducerService.ensureTopicsExist() method handles topic creation
+# This works in both local Docker and AWS ECS environments
+echo "🟡 [KAFKA] ✅ Kafka topics will be created automatically by the Node.js application"
 
 # Execute the original command
 echo "⚡ Starting application..."

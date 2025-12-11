@@ -18,46 +18,35 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production --silent
+# Install all dependencies (including dev dependencies for TypeScript compilation)
+RUN npm ci --silent
 
 # Copy source code
 COPY . .
 
+# Build TypeScript
+RUN npm run build
+
 # Production stage
 FROM node:18-alpine
 
-# Install runtime dependencies, Oracle Instant Client, and AWS CLI
+# Install runtime dependencies and AWS CLI
 RUN apk add --no-cache \
     aws-cli \
     jq \
     bash \
     curl \
-    libaio \
-    libnsl \
-    libc6-compat \
     && rm -rf /var/cache/apk/*
-
-# Install Oracle Instant Client
-WORKDIR /opt/oracle
-RUN curl -o instantclient-basic-linux.x64-21.12.0.0.0dbru.zip \
-    https://download.oracle.com/otn_software/linux/instantclient/2112000/instantclient-basic-linux.x64-21.12.0.0.0dbru.zip \
-    && unzip instantclient-basic-linux.x64-21.12.0.0.0dbru.zip \
-    && rm instantclient-basic-linux.x64-21.12.0.0.0dbru.zip \
-    && ln -s /opt/oracle/instantclient_21_12 /opt/oracle/instantclient
-
-# Set Oracle environment variables
-ENV LD_LIBRARY_PATH=/opt/oracle/instantclient:$LD_LIBRARY_PATH
-ENV ORACLE_CLIENT_DIR=/opt/oracle/instantclient
 
 # Create app directory
 WORKDIR /app
 
-# Copy from builder stage
-COPY --from=builder /app/node_modules ./node_modules
+# Copy built application and install only production dependencies
 COPY --from=builder /app/package*.json ./
-COPY --from=builder /app/src ./src
-COPY --from=builder /app/tsconfig.json ./
+COPY --from=builder /app/dist ./dist
+
+# Install only production dependencies
+RUN npm ci --only=production --silent && npm cache clean --force
 
 # Copy AWS entrypoint script
 COPY entrypoint-aws.sh /usr/local/bin/
@@ -78,4 +67,4 @@ EXPOSE 3000
 
 # Use AWS-aware entrypoint
 ENTRYPOINT ["/usr/local/bin/entrypoint-aws.sh"]
-CMD ["node", "src/index.js"]
+CMD ["node", "dist/index.js"]

@@ -1,0 +1,53 @@
+{
+  "containerDefinitions": [
+    {
+      "name": "callAnalytics-ollama",
+      "image": "320708867194.dkr.ecr.eu-west-1.amazonaws.com/pelephone/call-analytic/ollama",
+      "cpu": 0,
+      "portMappings": [
+        {
+          "containerPort": 11434,
+          "hostPort": 11434,
+          "protocol": "tcp",
+          "name": "ollama-service-11434-tcp",
+          "appProtocol": "http"
+        }
+      ],
+      "essential": true,
+      "environment": [],
+      "environmentFiles": [],
+      "mountPoints": [],
+      "volumesFrom": [],
+      "ulimits": [],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/callAnalytics-Ollama-minimal",
+          "awslogs-create-group": "true",
+          "awslogs-region": "eu-west-1",
+          "awslogs-stream-prefix": "ecs"
+        },
+        "secretOptions": []
+      },
+      "systemControls": []
+    }
+  ],
+  "family": "callAnalytics-Ollama-minimal",
+  "taskRoleArn": "arn:aws:iam::320708867194:role/ecsTaskExecutionRole",
+  "executionRoleArn": "arn:aws:iam::320708867194:role/ecsTaskExecutionRole",
+  "networkMode": "awsvpc",
+  "volumes": [],
+  "placementConstraints": [],
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "requiresCompatibilities": [
+    "EC2"
+  ],
+  "cpu": "2048",
+  "memory": "8192",
+  "ephemeralStorage": {
+    "sizeInGiB": 100
+  }
+}

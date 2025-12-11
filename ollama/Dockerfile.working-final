@@ -1,0 +1,43 @@
+FROM ollama/ollama:latest
+
+# Set environment for AWS ECS with GPU support - matching your docker-compose
+ENV OLLAMA_HOST=0.0.0.0:11434
+ENV OLLAMA_MODELS=/root/.ollama/models
+ENV HF_HOME=/root/.cache/huggingface
+
+# Performance optimizations (optimized for DictaLM 2.0) - from your docker-compose
+ENV OLLAMA_GPU_MEMORY_FRACTION=0.9
+ENV OLLAMA_NUM_GPU_LAYERS=32
+ENV OLLAMA_FLASH_ATTENTION=1
+ENV OLLAMA_KEEP_ALIVE=15m
+ENV OLLAMA_MAX_LOADED_MODELS=1
+ENV OLLAMA_NUM_PARALLEL=4
+ENV OLLAMA_NUM_BATCH=512
+ENV OLLAMA_NUM_THREADS=8
+
+# CUDA optimizations - from your docker-compose
+ENV CUDA_VISIBLE_DEVICES=0
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV CUDA_LAUNCH_BLOCKING=0
+ENV CUDA_CACHE_DISABLE=0
+ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+# Copy the GGUF model file and Modelfile
+COPY dictalm2.0-instruct.Q4_K_M.gguf /tmp/dictalm2.0-instruct.Q4_K_M.gguf
+COPY Modelfile.dictalm /tmp/Modelfile.dictalm
+
+# Create the model during build
+RUN ollama serve & \
+    sleep 10 && \
+    sed 's|FROM .*|FROM /tmp/dictalm2.0-instruct.Q4_K_M.gguf|' /tmp/Modelfile.dictalm > /tmp/Modelfile.fixed && \
+    timeout 180 ollama create dictalm2.0-instruct:Q4_K_M -f /tmp/Modelfile.fixed && \
+    ollama list && \
+    rm /tmp/dictalm2.0-instruct.Q4_K_M.gguf /tmp/Modelfile.* && \
+    pkill ollama && \
+    sleep 3
+
+EXPOSE 11434
+
+ENTRYPOINT []
+CMD ["ollama", "serve"]

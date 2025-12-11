@@ -1,0 +1,71 @@
+{
+    "family": "callAnalytics-Ollama-minimal",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": [
+        "EC2"
+    ],
+    "cpu": "2048",
+    "memory": "8192",
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "containerDefinitions": [
+        {
+            "name": "callAnalytics-ollama",
+            "image": "320708867194.dkr.ecr.eu-west-1.amazonaws.com/pelephone/call-analytic/ollama",
+            "cpu": 0,
+            "portMappings": [
+                {
+                    "containerPort": 11434,
+                    "hostPort": 11434,
+                    "protocol": "tcp",
+                    "name": "ollama-service-11434-tcp",
+                    "appProtocol": "http"
+                }
+            ],
+            "essential": true,
+            "environment": [
+                {
+                    "name": "OLLAMA_HOST",
+                    "value": "0.0.0.0:11434"
+                },
+                {
+                    "name": "OLLAMA_GPU_MEMORY_FRACTION",
+                    "value": "0.9"
+                },
+                {
+                    "name": "OLLAMA_NUM_GPU_LAYERS",
+                    "value": "32"
+                },
+                {
+                    "name": "OLLAMA_FLASH_ATTENTION",
+                    "value": "1"
+                },
+                {
+                    "name": "OLLAMA_KEEP_ALIVE",
+                    "value": "15m"
+                },
+                {
+                    "name": "OLLAMA_MAX_LOADED_MODELS",
+                    "value": "1"
+                },
+                {
+                    "name": "OLLAMA_NUM_PARALLEL",
+                    "value": "4"
+                }
+            ],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/callAnalytics-Ollama-minimal",
+                    "awslogs-create-group": "true",
+                    "awslogs-region": "eu-west-1",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            }
+        }
+    ]
+}

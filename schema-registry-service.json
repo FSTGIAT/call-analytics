@@ -1,0 +1,21 @@
+{
+  "serviceName": "callAnalytics-schema-registry-service",
+  "cluster": "accomplished-lion-toy",
+  "taskDefinition": "callAnalytics-schema-registry:2",
+  "desiredCount": 1,
+  "launchType": "EC2",
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": [
+        "subnet-0adf583746579df71",
+        "subnet-0b7dd94b73dbb0213",
+        "subnet-008c2d8f1f2c52a06",
+        "subnet-08f0efa03dd3348cd"
+      ],
+      "securityGroups": [
+        "sg-00185ec2fa3abefc1"
+      ],
+      "assignPublicIp": "DISABLED"
+    }
+  }
+}

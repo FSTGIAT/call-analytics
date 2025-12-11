@@ -1,0 +1,72 @@
+{
+    "family": "callAnalytics-ML-optimized",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": ["EC2"],
+    "cpu": "1024",
+    "memory": "3072",
+    "taskRoleArn": "arn:aws:iam::811287567672:role/ecsTaskExecutionRole",
+    "executionRoleArn": "arn:aws:iam::811287567672:role/ecsTaskExecutionRole",
+    "containerDefinitions": [
+        {
+            "name": "ml-service",
+            "image": "811287567672.dkr.ecr.eu-west-1.amazonaws.com/pelephone/call-analytic/ml-service:latest",
+            "cpu": 0,
+            "portMappings": [
+                {
+                    "containerPort": 5000,
+                    "hostPort": 5000,
+                    "protocol": "tcp",
+                    "name": "ml-service-5000-tcp"
+                }
+            ],
+            "essential": true,
+            "environment": [
+                {
+                    "name": "FLASK_ENV",
+                    "value": "production"
+                },
+                {
+                    "name": "TRANSFORMERS_OFFLINE",
+                    "value": "1"
+                },
+                {
+                    "name": "HF_HUB_OFFLINE",
+                    "value": "1"
+                },
+                {
+                    "name": "OLLAMA_BASE_URL",
+                    "value": "http://ollama.callanalytics.local:11434"
+                },
+                {
+                    "name": "USE_OLLAMA_FOR_HEBREW",
+                    "value": "true"
+                },
+                {
+                    "name": "HEBREW_MODEL",
+                    "value": "dictalm2.0-instruct:Q4_K_M"
+                },
+                {
+                    "name": "DEFAULT_MODEL",
+                    "value": "dictalm2.0-instruct:Q4_K_M"
+                },
+                {
+                    "name": "OLLAMA_TIMEOUT",
+                    "value": "40"
+                }
+            ],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/callAnalytics-ML-optimized",
+                    "awslogs-create-group": "true",
+                    "awslogs-region": "eu-west-1",
+                    "awslogs-stream-prefix": "ecs"
+                },
+                "secretOptions": []
+            },
+            "systemControls": []
+        }
+    ]
+}

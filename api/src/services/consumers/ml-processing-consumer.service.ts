@@ -1,6 +1,6 @@
 import { KafkaConsumerBase, ProcessingContext } from '../kafka-consumer-base.service';
 import { ConversationAssembly, MLProcessingResult } from '../../types/kafka-messages';
-import { getKafkaProducer } from '../kafka-producer.service';
+import { getKafkaProducer } from '../sqs-producer.service';
 import { logger } from '../../utils/logger';
 import axios from 'axios';
 
@@ -10,6 +10,7 @@ interface MLProcessingConfig {
     retryAttempts: number;
     batchSize: number;
     hebrewDetectionThreshold: number;
+    queueName: string; // Required for SQS consumer compatibility
 }
 
 interface MLServiceResponse {
@@ -28,7 +29,12 @@ interface MLServiceResponse {
         confidence: number;
         isHebrew: boolean;
     };
-    classifications?: string[];  // Added classifications field
+    classifications?: string[];  // Backward compatible - array of classifications
+    // NEW: Explicit primary/secondary classification fields
+    main_category?: string;      // Primary classification - the main reason for the call
+    secondary_category?: string; // Secondary classification (optional)
+    call_type?: string;          // "inbound_service" | "outbound_marketing" | "winback"
+    is_churn_signal?: boolean;   // True only when main_category is abandon
     entities?: {
         persons: string[];
         locations: string[];
@@ -49,7 +55,7 @@ interface MLServiceResponse {
 }
 
 export class MLProcessingConsumerService extends KafkaConsumerBase {
-    private config: MLProcessingConfig;
+    private mlConfig: MLProcessingConfig;
     private processingQueue = new Map<string, ConversationAssembly>();
     private processingInProgress = new Set<string>();
     private processedConversations = new Map<string, { messageCount: number; lastProcessed: Date; messageId: string }>(); // Track processed conversations with metadata
@@ -64,16 +70,17 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
             fromBeginning: true
         });
 
-        this.config = {
-            mlServiceUrl: process.env.ML_SERVICE_URL || 'http://ml-service:5000',
+        this.mlConfig = {
+            mlServiceUrl: process.env.ML_SERVICE_URL || 'http://ml-service-optimized.callanalytics.local:5000',
             timeout: parseInt(process.env.ML_PROCESSING_TIMEOUT || '180000'), // 3 minutes for GPU processing
             retryAttempts: parseInt(process.env.ML_RETRY_ATTEMPTS || '3'),
             batchSize: parseInt(process.env.ML_BATCH_SIZE || '5'),
-            hebrewDetectionThreshold: parseFloat(process.env.HEBREW_DETECTION_THRESHOLD || '0.8')
+            hebrewDetectionThreshold: parseFloat(process.env.HEBREW_DETECTION_THRESHOLD || '0.8'),
+            queueName: process.env.KAFKA_TOPIC_CONVERSATION_ASSEMBLY || 'conversation-assembly'
         };
     }
 
-    protected async processMessage(
+    protected async processKafkaMessage(
         message: ConversationAssembly, 
         context: ProcessingContext
     ): Promise<void> {
@@ -209,12 +216,24 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
             embedding: mlResponse.embedding,
             sentiment: mlResponse.sentiment,
             language: mlResponse.language,
-            classifications: mlResponse.classifications && mlResponse.classifications.length > 0 ? {
-                primary: mlResponse.classifications[0] || '',
-                secondary: mlResponse.classifications.slice(1) || [],
-                all: mlResponse.classifications || [],
-                confidence: 0.9  // High confidence for Hebrew classification
-            } : undefined,
+            // NEW: Use main_category/secondary_category if available, fallback to classifications array
+            classifications: (() => {
+                const primary = mlResponse.main_category || mlResponse.classifications?.[0] || '';
+                const secondary = mlResponse.secondary_category
+                    ? [mlResponse.secondary_category]
+                    : mlResponse.classifications?.slice(1) || [];
+                const all = mlResponse.classifications || [primary, ...secondary].filter(Boolean);
+
+                return primary ? {
+                    primary: primary,
+                    secondary: secondary,
+                    all: all,
+                    confidence: 0.9,  // High confidence for Hebrew classification
+                    // NEW fields for enhanced classification
+                    is_churn: mlResponse.is_churn_signal || false,
+                    call_type: mlResponse.call_type || 'unknown'
+                } : undefined;
+            })(),
             entities: mlResponse.entities,
             summary: mlResponse.summary,
             topics: mlResponse.topics,
@@ -261,15 +280,15 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
     ): Promise<MLServiceResponse> {
         let lastError: Error | null = null;
 
-        for (let attempt = 1; attempt <= this.config.retryAttempts; attempt++) {
+        for (let attempt = 1; attempt <= this.mlConfig.retryAttempts; attempt++) {
             try {
-                logger.debug(`ML service call attempt ${attempt}/${this.config.retryAttempts}`, {
+                logger.debug(`ML service call attempt ${attempt}/${this.mlConfig.retryAttempts}`, {
                     callId,
                     textLength: conversationText.length
                 });
 
                 const response = await axios.post(
-                    `${this.config.mlServiceUrl}/api/analyze-conversation`,
+                    `${this.mlConfig.mlServiceUrl}/api/analyze-conversation`,
                     {
                         text: conversationText,
                         callId: callId,
@@ -286,7 +305,7 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
                         }
                     },
                     {
-                        timeout: this.config.timeout,
+                        timeout: this.mlConfig.timeout,
                         headers: {
                             'Content-Type': 'application/json',
                             'Accept': 'application/json'
@@ -303,14 +322,14 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
             } catch (error) {
                 lastError = error instanceof Error ? error : new Error(String(error));
                 
-                logger.warn(`ML service call failed (attempt ${attempt}/${this.config.retryAttempts})`, {
+                logger.warn(`ML service call failed (attempt ${attempt}/${this.mlConfig.retryAttempts})`, {
                     callId,
                     error: lastError.message,
                     attempt
                 });
 
                 // Wait before retry (exponential backoff)
-                if (attempt < this.config.retryAttempts) {
+                if (attempt < this.mlConfig.retryAttempts) {
                     const delay = Math.pow(2, attempt - 1) * 1000; // 1s, 2s, 4s...
                     await new Promise(resolve => setTimeout(resolve, delay));
                 }
@@ -318,7 +337,7 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
         }
 
         // All retries failed
-        throw new Error(`ML service failed after ${this.config.retryAttempts} attempts: ${lastError?.message}`);
+        throw new Error(`ML service failed after ${this.mlConfig.retryAttempts} attempts: ${lastError?.message}`);
     }
 
     private validateMLResponse(response: any, callId: string): MLServiceResponse {
@@ -423,7 +442,7 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
             const baseHealth = await super.healthCheck();
             
             // Test ML service connectivity
-            const response = await axios.get(`${this.config.mlServiceUrl}/health`, {
+            const response = await axios.get(`${this.mlConfig.mlServiceUrl}/health`, {
                 timeout: 5000
             });
             
@@ -459,9 +478,9 @@ export class MLProcessingConsumerService extends KafkaConsumerBase {
             ...super.getMetrics(),
             processingQueueSize: this.processingQueue.size,
             activeProcessing: this.processingInProgress.size,
-            mlServiceUrl: this.config.mlServiceUrl,
-            mlTimeout: this.config.timeout,
-            retryAttempts: this.config.retryAttempts
+            mlServiceUrl: this.mlConfig.mlServiceUrl,
+            mlTimeout: this.mlConfig.timeout,
+            retryAttempts: this.mlConfig.retryAttempts
         };
     }
 }

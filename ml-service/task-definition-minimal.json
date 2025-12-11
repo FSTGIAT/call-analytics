@@ -1,0 +1,49 @@
+{
+    "family": "CallAnalytics-ML",
+    "networkMode": "awsvpc", 
+    "requiresCompatibilities": ["EC2"],
+    "cpu": "6144",
+    "memory": "28672",
+    "containerDefinitions": [
+        {
+            "name": "callAnalytics-ml-service",
+            "image": "811287567672.dkr.ecr.us-east-1.amazonaws.com/ml-service:latest",
+            "cpu": 2048,
+            "memory": 7168,
+            "memoryReservation": 6144,
+            "portMappings": [
+                {
+                    "containerPort": 5000,
+                    "hostPort": 5000,
+                    "protocol": "tcp"
+                }
+            ],
+            "essential": true,
+            "environment": [
+                {
+                    "name": "USE_GPU",
+                    "value": "true"
+                },
+                {
+                    "name": "HF_HOME", 
+                    "value": "/app/cache/huggingface"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/CallAnalytics-ML",
+                    "awslogs-create-group": "true",
+                    "awslogs-region": "eu-west-1",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            },
+            "resourceRequirements": [
+                {
+                    "value": "1",
+                    "type": "GPU"
+                }
+            ]
+        }
+    ]
+}

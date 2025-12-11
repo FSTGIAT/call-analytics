@@ -1,0 +1,27 @@
+{
+    "family": "test-ollama-connection",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": ["EC2"],
+    "cpu": "256",
+    "memory": "512",
+    "containerDefinitions": [
+        {
+            "name": "curl-test",
+            "image": "curlimages/curl:latest",
+            "essential": true,
+            "command": [
+                "sh", "-c", 
+                "echo 'Testing Ollama API...'; curl -v http://10.0.0.72:11434/api/tags; echo '\\n\\nTesting model endpoint...'; curl -v http://10.0.0.72:11434/api/generate -d '{\"model\":\"dictalm2.0-instruct:Q4_K_M\",\"prompt\":\"Hello\",\"stream\":false}' -H 'Content-Type: application/json'; sleep 30"
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/test-ollama",
+                    "awslogs-create-group": "true",
+                    "awslogs-region": "eu-west-1",
+                    "awslogs-stream-prefix": "test"
+                }
+            }
+        }
+    ]
+}

@@ -5,9 +5,9 @@ import { searchRoutes } from './search.routes';
 import { analyticsRoutes } from './analytics.routes';
 import { mcpRoutes } from './mcp.routes';
 import { scaleRoutes } from './scale.routes';
-import { realtimeCDCRoutes } from './realtime-cdc.routes';
 import { aiRoutes } from './ai.routes';
-import kafkaMonitoringRoutes from './kafka-monitoring.routes';
+// Kafka monitoring routes removed - using SQS instead
+// CDC routes removed - CDC now runs on-premises
 import mcpAdminRoutes from './mcp-admin.routes';
 import adminRoutes from './admin.routes';
 
@@ -20,9 +20,9 @@ router.use('/search', searchRoutes);
 router.use('/analytics', analyticsRoutes);
 router.use('/mcp', mcpRoutes);
 router.use('/scale', scaleRoutes);
-router.use('/realtime-cdc', realtimeCDCRoutes);
 router.use('/ai', aiRoutes);
-router.use('/kafka', kafkaMonitoringRoutes);
+// Kafka monitoring routes removed - replaced with SQS
+// CDC routes removed - CDC now runs on-premises
 router.use('/admin/mcp', mcpAdminRoutes);
 router.use('/admin', adminRoutes);
 
@@ -38,9 +38,7 @@ router.get('/', (req, res) => {
       analytics: '/analytics',
       mcp: '/mcp',
       scale: '/scale',
-      'realtime-cdc': '/realtime-cdc',
       ai: '/ai',
-      kafka: '/kafka',
       'admin/mcp': '/admin/mcp',
       admin: '/admin'
     }

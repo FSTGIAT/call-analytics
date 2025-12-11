@@ -1,0 +1,37 @@
+{
+  "family": "callAnalytics-schema-registry",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["EC2"],
+  "cpu": "512",
+  "memory": "1024",
+  "containerDefinitions": [
+    {
+      "name": "schema-registry",
+      "image": "811287567672.dkr.ecr.eu-west-1.amazonaws.com/pelephone/call-analytic/schema-registry:latest",
+      "portMappings": [
+        {
+          "containerPort": 8081,
+          "hostPort": 8081,
+          "protocol": "tcp",
+          "name": "schema-registry-8081-tcp",
+          "appProtocol": "http"
+        }
+      ],
+      "essential": true,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/callAnalytics-schema-registry",
+          "awslogs-region": "eu-west-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "environment": [
+        {
+          "name": "AWS_REGION",
+          "value": "eu-west-1"
+        }
+      ]
+    }
+  ]
+}

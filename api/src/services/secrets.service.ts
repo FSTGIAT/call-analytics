@@ -85,8 +85,28 @@ export class SecretsService {
     pool_max: string;
     pool_increment: string;
     pool_timeout: string;
+    privilege?: string;
   }> {
-    return await this.getSecret('prod/call-analytics/oracle');
+    logger.info('🟠 [ORACLE] Starting Oracle config retrieval from secrets...');
+    try {
+      const config = await this.getSecret('prod/call-analytics/oracle');
+      logger.info('🟠 [ORACLE] Successfully retrieved Oracle config:', {
+        username: config.username,
+        host: config.host,
+        port: config.port,
+        service_name: config.service_name,
+        pool_min: config.pool_min,
+        pool_max: config.pool_max,
+        pool_increment: config.pool_increment,
+        pool_timeout: config.pool_timeout,
+        privilege: config.privilege,
+        hasPassword: !!config.password
+      });
+      return config;
+    } catch (error) {
+      logger.error('🟠 [ORACLE] Failed to get Oracle config from secrets:', error);
+      throw error;
+    }
   }
 
   /**
@@ -98,7 +118,20 @@ export class SecretsService {
     password: string;
     db: string;
   }> {
-    return await this.getSecret('prod/call-analytics/redis');
+    logger.info('🔴 [REDIS] Starting Redis config retrieval from secrets...');
+    try {
+      const config = await this.getSecret('prod/call-analytics/redis');
+      logger.info('🔴 [REDIS] Successfully retrieved Redis config:', {
+        host: config.host,
+        port: config.port,
+        db: config.db,
+        hasPassword: !!config.password
+      });
+      return config;
+    } catch (error) {
+      logger.error('🔴 [REDIS] Failed to get Redis config from secrets:', error);
+      throw error;
+    }
   }
 
   /**
@@ -172,13 +205,29 @@ export class SecretsService {
    * Check if running in AWS environment (ECS, Lambda, etc.)
    */
   isAWSEnvironment(): boolean {
-    return !!(
-      process.env.AWS_EXECUTION_ENV ||
-      process.env.AWS_LAMBDA_RUNTIME_API ||
-      process.env.ECS_CONTAINER_METADATA_URI_V4 ||
-      process.env.AWS_REGION ||
-      process.env.AWS_DEFAULT_REGION
+    const awsIndicators = {
+      AWS_EXECUTION_ENV: process.env.AWS_EXECUTION_ENV,
+      AWS_LAMBDA_RUNTIME_API: process.env.AWS_LAMBDA_RUNTIME_API,
+      ECS_CONTAINER_METADATA_URI_V4: process.env.ECS_CONTAINER_METADATA_URI_V4,
+      AWS_REGION: process.env.AWS_REGION,
+      AWS_DEFAULT_REGION: process.env.AWS_DEFAULT_REGION
+    };
+    
+    const isAWS = !!(
+      awsIndicators.AWS_EXECUTION_ENV ||
+      awsIndicators.AWS_LAMBDA_RUNTIME_API ||
+      awsIndicators.ECS_CONTAINER_METADATA_URI_V4 ||
+      awsIndicators.AWS_REGION ||
+      awsIndicators.AWS_DEFAULT_REGION
     );
+    
+    logger.info('🔍 AWS Environment Detection:', {
+      isAWSEnvironment: isAWS,
+      indicators: awsIndicators,
+      nodeEnv: process.env.NODE_ENV
+    });
+    
+    return isAWS;
   }
 
   /**

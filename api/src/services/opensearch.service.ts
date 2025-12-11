@@ -1,6 +1,7 @@
 import { Client } from '@opensearch-project/opensearch';
 import { logger } from '../utils/logger';
 import { CustomerContext } from '../types/customer';
+import { secretsService } from './secrets.service';
 
 export interface OpenSearchConfig {
   node: string;
@@ -48,23 +49,101 @@ export class OpenSearchService {
   private client: Client;
   private config: OpenSearchConfig;
   private indexPrefix: string;
+  private isInitialized: boolean = false;
 
   constructor() {
+    // Initialize with default config - will be updated in initialize()
     this.config = {
-      node: process.env.OPENSEARCH_URL || 
-        (process.env.OPENSEARCH_HOST 
-          ? `http://${process.env.OPENSEARCH_HOST}:${process.env.OPENSEARCH_PORT || 9200}`
-          : 'http://opensearch:9200'),
+      node: 'http://opensearch:9200',
       ssl: {
         rejectUnauthorized: false
       }
     };
+    this.indexPrefix = 'call-analytics';
+    this.initialize();
+  }
 
-    this.indexPrefix = process.env.OPENSEARCH_INDEX_PREFIX || 'call-analytics';
+  private async initialize() {
+    logger.info('🔍 [OPENSEARCH] Starting OpenSearch connection initialization...');
 
-    this.client = new Client(this.config);
-    
-    logger.info(`OpenSearch client initialized: ${this.config.node}`);
+    try {
+      const isAWS = secretsService.isAWSEnvironment();
+
+      if (isAWS) {
+        logger.info('🔍 [OPENSEARCH] AWS environment detected, loading from Secrets Manager...');
+        const opensearchSecrets = await secretsService.getOpenSearchConfig();
+
+        logger.info('🔍 [OPENSEARCH] Secrets loaded:', {
+          host: opensearchSecrets.host,
+          port: opensearchSecrets.port,
+          url: opensearchSecrets.url
+        });
+
+        this.config = {
+          node: opensearchSecrets.url || `http://${opensearchSecrets.host}:${opensearchSecrets.port}`,
+          ssl: {
+            rejectUnauthorized: false
+          }
+        };
+
+        if (opensearchSecrets.username && opensearchSecrets.password) {
+          this.config.auth = {
+            username: opensearchSecrets.username,
+            password: opensearchSecrets.password
+          };
+        }
+
+        logger.info('🔍 [OPENSEARCH] OpenSearch configuration loaded from AWS Secrets Manager');
+      } else {
+        logger.info('🔍 [OPENSEARCH] Local environment detected, using environment variables...');
+
+        this.config = {
+          node: process.env.OPENSEARCH_URL ||
+            (process.env.OPENSEARCH_HOST
+              ? `http://${process.env.OPENSEARCH_HOST}:${process.env.OPENSEARCH_PORT || 9200}`
+              : 'http://opensearch:9200'),
+          ssl: {
+            rejectUnauthorized: false
+          }
+        };
+
+        logger.info('🔍 [OPENSEARCH] OpenSearch configuration loaded from environment variables');
+      }
+
+      this.indexPrefix = process.env.OPENSEARCH_INDEX_PREFIX || 'call-analytics';
+
+      logger.info(`🔍 [OPENSEARCH] Creating client with URL: ${this.config.node}`);
+      this.client = new Client(this.config);
+      this.isInitialized = true;
+
+      logger.info(`🔍 [OPENSEARCH] ✅ OpenSearch client initialized: ${this.config.node}`);
+
+      // Test connection
+      const health = await this.healthCheck();
+      if (health) {
+        logger.info('🔍 [OPENSEARCH] ✅ Connection verified - cluster is healthy');
+      } else {
+        logger.warn('🔍 [OPENSEARCH] ⚠️ Cluster health check failed, but client is initialized');
+      }
+
+    } catch (error) {
+      logger.error('🔍 [OPENSEARCH] ❌ Failed to initialize OpenSearch connection:', error);
+      // Still create client with default config to avoid null reference errors
+      this.client = new Client(this.config);
+      this.isInitialized = false;
+    }
+  }
+
+  async waitForInitialization(): Promise<void> {
+    if (this.isInitialized) return;
+
+    // Wait up to 10 seconds for initialization
+    for (let i = 0; i < 20; i++) {
+      if (this.isInitialized) return;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    logger.warn('🔍 [OPENSEARCH] Timeout waiting for initialization, proceeding with current config');
   }
 
   async healthCheck(): Promise<boolean> {
@@ -839,7 +918,18 @@ export class OpenSearchService {
           keyTopics: { type: 'keyword', index: true },
           sentiment: { type: 'keyword', index: true },
           urgency: { type: 'keyword', index: true },
-          createdAt: { type: 'date' }
+          createdAt: { type: 'date' },
+          // Vector embeddings for semantic search (AlephBERT Hebrew model)
+          embedding: {
+            type: 'knn_vector',
+            dimension: 768,
+            method: {
+              name: 'hnsw',
+              space_type: 'l2',
+              engine: 'lucene'
+            }
+          },
+          embeddingModel: { type: 'keyword', index: true }
         }
       };
     }
@@ -848,6 +938,7 @@ export class OpenSearchService {
   // Additional methods for Kafka consumer compatibility
   async indexExists(indexName: string): Promise<boolean> {
     try {
+      await this.waitForInitialization();
       const response = await this.client.indices.exists({ index: indexName });
       return response.body;
     } catch (error) {
@@ -858,6 +949,15 @@ export class OpenSearchService {
 
   async createIndex(indexName: string, indexConfig: any): Promise<void> {
     try {
+      await this.waitForInitialization();
+
+      // Check if index already exists
+      const exists = await this.client.indices.exists({ index: indexName });
+      if (exists.body) {
+        logger.info(`Index ${indexName} already exists, skipping creation`);
+        return;
+      }
+
       await this.client.indices.create({
         index: indexName,
         body: indexConfig

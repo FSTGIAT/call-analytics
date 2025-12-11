@@ -135,6 +135,9 @@ export interface MLProcessingResult extends KafkaMessage {
         secondary: string[];
         all: string[];  // All classifications including primary
         confidence: number;
+        // NEW: Enhanced classification fields
+        is_churn?: boolean;   // True only when primary = "סימני נטישה/איום לעזוב"
+        call_type?: string;   // "inbound_service" | "outbound_marketing" | "winback" | "unknown"
     };
     conversationContext: {
         messageCount: number;

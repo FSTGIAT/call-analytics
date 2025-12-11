@@ -4,9 +4,17 @@ import asyncio
 import aiohttp
 import logging
 import hashlib
+import time
 from typing import Dict, List, Optional, AsyncGenerator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+
+# Import call direction detection (lightweight, no keyword filtering)
+# NOTE: Keyword-based classification filtering removed - trust DictaLM's Hebrew understanding
+from .classification_keywords import detect_call_direction
+
+# Import CloudWatch metrics service
+from .cloudwatch_metrics_service import cloudwatch_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -121,11 +129,11 @@ class OllamaService:
     def __init__(self):
         # ONLY DictaLM - no other models!
         self.config = OllamaConfig(
-            base_url=os.getenv('OLLAMA_BASE_URL', 'http://ollama:11434'),
+            base_url=os.getenv('OLLAMA_BASE_URL', 'http://ollama.callanalytics.local:11434'),
             model_name=os.getenv('DEFAULT_MODEL', 'dictalm2.0-instruct:Q4_K_M'),  # Updated model name
-            temperature=float(os.getenv('MODEL_TEMPERATURE', '0.2')),  # Lower for faster, more focused responses
-            max_tokens=int(os.getenv('MODEL_MAX_TOKENS', '800')),  # Increased for complex conversations
-            timeout=int(os.getenv('REQUEST_TIMEOUT', '120'))  # Increased timeout for GPU processing
+            temperature=float(os.getenv('MODEL_TEMPERATURE', '0.5')),  # Optimized for Hebrew
+            max_tokens=int(os.getenv('MODEL_MAX_TOKENS', '4000')),  # Increased from 3000 for Hebrew JSON
+            timeout=int(os.getenv('REQUEST_TIMEOUT', '60'))  # 60s timeout - Ollama running on CPU (NEEDS GPU!)
         )
         
         # Always use DictaLM for everything
@@ -164,6 +172,21 @@ class OllamaService:
         except Exception as e:
             logger.error(f"Failed to load classifications: {e}")
             self.hebrew_classifications = []
+
+        # Load keyword-based classification mappings
+        self.classification_keywords = {}
+        try:
+            keywords_path = '/app/config/classification-keywords.json'
+            if os.path.exists(keywords_path):
+                with open(keywords_path, 'r', encoding='utf-8') as f:
+                    keywords_config = json.load(f)
+                    self.classification_keywords = keywords_config.get('keywords', {})
+                    logger.info(f"✅ Loaded keyword mappings for {len(self.classification_keywords)} categories")
+            else:
+                logger.warning(f"Keywords file not found at {keywords_path}")
+        except Exception as e:
+            logger.error(f"Failed to load classification keywords: {e}")
+            self.classification_keywords = {}
         
         # Force log final state
         logger.info(f"OllamaService initialization complete. Classifications available: {len(self.hebrew_classifications) > 0}")
@@ -197,7 +220,60 @@ class OllamaService:
         
         logger.info(f"Ollama service initialized with model: {self.config.model_name}")
         logger.info(f"Hebrew model configured: {self.hebrew_model} (enabled: {self.use_dictalm_for_hebrew})")
-    
+
+    def _classify_by_keywords(self, transcription: str) -> Optional[str]:
+        """
+        Keyword-based classification to assist/override LLM classification.
+        Returns the best matching category based on keyword presence in transcription.
+
+        Args:
+            transcription: The call transcription text
+
+        Returns:
+            Best matching category or None if no strong match
+        """
+        if not self.classification_keywords or not transcription:
+            return None
+
+        text_lower = transcription.lower()
+        scores = {}
+
+        for category, keywords_data in self.classification_keywords.items():
+            score = 0
+            strong_keywords = keywords_data.get('strong', [])
+            weak_keywords = keywords_data.get('weak', [])
+
+            # Strong keywords = 3 points each
+            for keyword in strong_keywords:
+                if keyword in text_lower:
+                    score += 3
+                    logger.debug(f"🔑 Strong keyword '{keyword}' found for '{category}' (+3)")
+
+            # Weak keywords = 1 point each
+            for keyword in weak_keywords:
+                if keyword in text_lower:
+                    score += 1
+                    logger.debug(f"🔑 Weak keyword '{keyword}' found for '{category}' (+1)")
+
+            if score > 0:
+                scores[category] = score
+
+        if not scores:
+            return None
+
+        # Get best match (minimum threshold of 2)
+        best_category = max(scores.keys(), key=lambda k: scores[k])
+        best_score = scores[best_category]
+
+        if best_score >= 2:
+            logger.info(f"🎯 Keyword classification: '{best_category}' (score: {best_score})")
+            # Log all scores for debugging
+            sorted_scores = sorted(scores.items(), key=lambda x: -x[1])[:5]
+            logger.info(f"📊 Top keyword scores: {sorted_scores}")
+            return best_category
+
+        return None
+
     def _get_semaphore(self) -> asyncio.Semaphore:
         """Get or create semaphore for current event loop."""
         try:
@@ -213,7 +289,87 @@ class OllamaService:
             # No running event loop, create a new semaphore
             logger.warning("No running event loop found, creating standalone semaphore")
             return asyncio.Semaphore(self.max_concurrent)
-    
+
+    def _validate_classifications(self, classifications: list, valid_list: list = None) -> list:
+        """
+        STRENGTHENED validation - reject non-matching classifications completely.
+
+        Args:
+            classifications: List of classifications from DictaLM
+            valid_list: The filtered list to validate against (if None, uses full list)
+
+        Returns:
+            List of validated classifications that match the valid list
+        """
+        # Use provided valid_list or fall back to full list
+        reference_list = valid_list if valid_list else self.hebrew_classifications
+
+        if not classifications or not reference_list:
+            logger.warning("⚠️ No classifications to validate or no reference list")
+            return ["לא מסווג"]
+
+        # STRICT: Only accept list type
+        if not isinstance(classifications, list):
+            logger.error(f"❌ Invalid classification type: {type(classifications)} - MUST be list. Returning default.")
+            return ["לא מסווג"]
+
+        validated = []
+        for classification in classifications:
+            # Skip empty/None values
+            if not classification and classification != 0:
+                continue
+
+            # Handle integer indices (when DictaLM returns [1, 2] instead of text)
+            if isinstance(classification, int):
+                # Convert 1-based index to 0-based and lookup in reference list
+                idx = classification - 1  # DictaLM uses 1-based numbering
+                if 0 <= idx < len(reference_list):
+                    resolved = reference_list[idx]
+                    logger.info(f"🔢 Resolved index {classification} → '{resolved}'")
+                    validated.append(resolved)
+                else:
+                    logger.warning(f"❌ Invalid classification index: {classification} (list has {len(reference_list)} items)")
+                continue
+
+            # STRICT: Only accept strings after handling integers
+            if not isinstance(classification, str):
+                logger.warning(f"❌ Non-string classification detected: {type(classification)} - skipping")
+                continue
+
+            # Strip whitespace
+            classification = classification.strip()
+            if not classification:
+                continue
+
+            # Strip number prefix if exists (e.g., "8. מעבר תכנית" -> "מעבר תכנית")
+            import re
+            classification = re.sub(r'^\d+\.\s*', '', classification).strip()
+
+            # Check exact match first
+            if classification in reference_list:
+                validated.append(classification)
+                logger.debug(f"✅ Exact match: '{classification}'")
+                continue
+
+            # Fuzzy matching: 85% threshold (balanced for Hebrew variations)
+            from difflib import get_close_matches
+            matches = get_close_matches(classification, reference_list, n=1, cutoff=0.85)
+
+            if matches:
+                logger.info(f"🔍 Fuzzy matched (85%+): '{classification}' → '{matches[0]}'")
+                validated.append(matches[0])
+            else:
+                # STRICT: Reject classifications that don't match at 95%
+                logger.warning(f"❌ REJECTED - Not in valid list: '{classification}'")
+                logger.debug(f"   Valid options were: {reference_list[:5]}... (showing first 5)")
+
+        # If no valid classifications after strict validation, use default
+        if not validated:
+            logger.warning("⚠️ No valid classifications passed strict validation - using 'לא מסווג'")
+            validated.append("לא מסווג")
+
+        return validated
+
     def _sanitize_hebrew_for_json(self, text: str) -> str:
         """
         Sanitize Hebrew text to prevent JSON parsing errors.
@@ -365,10 +521,21 @@ class OllamaService:
         """Generate a response using Ollama with caching."""
         
         start_time = datetime.now()
+        perf_start = time.time()
+        
+        # Performance logging
+        logger.info(f"[PERF] === STARTING LLM REQUEST AT {start_time} ===")
+        logger.info(f"[PERF] Prompt length: {len(prompt)} chars")
+        if system_prompt:
+            logger.info(f"[PERF] System prompt length: {len(system_prompt)} chars")
         
         # Always use DictaLM - it handles Hebrew, English, and mixed text perfectly
         model_name = self.hebrew_model
-        logger.info(f"Using DictaLM model: {model_name}")
+        logger.info(f"[PERF] Using DictaLM model: {model_name}")
+        logger.info(f"[PERF] Timeout configured: {self.config.timeout}s")
+        logger.info(f"[PERF] Ollama URL: {self.config.base_url}")
+        logger.info(f"[PERF] Using model: {self.config.model_name}")
+        logger.info(f"[PERF] Prompt length: {len(prompt)} characters")
         
         temp = temperature if temperature is not None else self.config.temperature
         max_tok = max_tokens or self.config.max_tokens
@@ -396,15 +563,16 @@ class OllamaService:
                 payload = {
                     "model": model_name,
                     "prompt": prompt,
+                    "format": "json",  # Force Ollama to return valid JSON only
                     "options": {
                         "temperature": temp,
                         "num_predict": max_tok,
-                        "num_ctx": 4096,  # Increased for complex conversations
-                        "repeat_penalty": 1.1,  # Restore original
+                        "num_ctx": 16384,  # Increased from 8192 for long Hebrew conversations
+                        "repeat_penalty": 1.1,
                     },
                     "stream": False
                 }
-                
+
                 if system_prompt:
                     payload["system"] = system_prompt
                 
@@ -420,6 +588,47 @@ class OllamaService:
                             end_time = datetime.now()
                             processing_time = (end_time - start_time).total_seconds()
                             
+                            # Detailed performance logging
+                            response_length = len(data.get('response', ''))
+                            eval_duration = data.get('eval_duration', 0) / 1e9  # Convert nanoseconds to seconds
+                            prompt_eval_duration = data.get('prompt_eval_duration', 0) / 1e9
+                            total_duration = data.get('total_duration', 0) / 1e9
+                            load_duration = data.get('load_duration', 0) / 1e9
+                            
+                            # Enhanced performance logging with token usage analysis
+                            tokens_generated = data.get('eval_count', 0)
+                            tokens_limit = max_tok
+                            token_usage_pct = (tokens_generated / tokens_limit * 100) if tokens_limit > 0 else 0
+
+                            logger.info(f"[PERF] === OLLAMA PERFORMANCE BREAKDOWN ===")
+                            logger.info(f"[PERF] Model load time: {load_duration:.2f}s")
+                            logger.info(f"[PERF] Prompt eval time: {prompt_eval_duration:.2f}s")
+                            logger.info(f"[PERF] Prompt tokens: {data.get('prompt_eval_count', 0)}")
+                            logger.info(f"[PERF] Generation time: {eval_duration:.2f}s")
+                            logger.info(f"[PERF] Total Ollama time: {total_duration:.2f}s")
+                            logger.info(f"[PERF] Full request time: {processing_time:.2f}s")
+                            logger.info(f"[PERF] Response length: {response_length} chars")
+                            if processing_time > 0:
+                                logger.info(f"[PERF] Generation speed: {response_length/processing_time:.1f} chars/sec")
+                            logger.info(f"[PERF] Tokens generated: {tokens_generated} / {tokens_limit} ({token_usage_pct:.1f}%)")
+
+                            # Warning if approaching token limit
+                            if token_usage_pct > 90:
+                                logger.warning(f"⚠️ TOKEN LIMIT WARNING: Using {token_usage_pct:.1f}% of max_tokens - response may be truncated!")
+                            elif token_usage_pct > 75:
+                                logger.warning(f"Token usage high: {token_usage_pct:.1f}% of limit")
+
+                            # Hebrew tokenization ratio analysis
+                            if response_length > 0 and tokens_generated > 0:
+                                chars_per_token = response_length / tokens_generated
+                                logger.info(f"[PERF] Hebrew efficiency: {chars_per_token:.2f} chars/token")
+
+                            logger.info(f"[PERF] === END PERFORMANCE BREAKDOWN ===")
+
+                            # === CloudWatch Metrics: LLM Performance ===
+                            cloudwatch_metrics.put_metric('LLMProcessingTime', processing_time * 1000, 'Milliseconds')
+                            cloudwatch_metrics.put_metric('TokenUsagePercent', token_usage_pct, 'Percent')
+
                             self.request_count += 1
                             
                             llm_response = LLMResponse(
@@ -435,11 +644,18 @@ class OllamaService:
                                     'load_duration': data.get('load_duration', 0)
                                 }
                             )
-                            
-                            # Cache the response with classification availability
+
+                            # Cache the response ONLY if it's valid JSON (defensive programming)
                             if self.cache:
                                 classifications_available = len(self.hebrew_classifications) > 0
-                                self.cache.set(full_prompt, model_name, temp, max_tok, classifications_available, llm_response)
+                                try:
+                                    # Validate response is valid JSON before caching
+                                    json.loads(llm_response.content)
+                                    self.cache.set(full_prompt, model_name, temp, max_tok, classifications_available, llm_response)
+                                    logger.debug(f"Response validated and cached")
+                                except json.JSONDecodeError:
+                                    logger.warning(f"Not caching response - invalid JSON format")
+                                    # Don't cache, but still return the response for error handling downstream
                             
                             return llm_response
                         elif response.status == 404 and model_name == self.hebrew_model:
@@ -527,7 +743,7 @@ class OllamaService:
                     "stream": True,
                     "options": {
                         "temperature": self.config.temperature,
-                        "num_predict": 800,
+                        "num_predict": 3000,  # Increased for Hebrew responses
                     }
                 }
                 
@@ -571,102 +787,75 @@ class OllamaService:
         prompt_template: str = 'summarize_with_id'
     ) -> Dict:
         """Generate a structured summary of a call transcription with automatic Hebrew prompt."""
-        
-        # Improved prompts in English for better LLM understanding
-        if language.lower() in ['hebrew', 'he']:
-            # Use template-based system prompt if available
-            lang_templates = self.prompt_templates.get('hebrew', {})
-            system_prompt = lang_templates.get('system_prompt', 
-                """Analyze customer service call. Output structured JSON only. 
-IMPORTANT: The call is in Hebrew, provide all text fields in Hebrew.""")
-            
-            # Build classifications list for prompt
-            classifications_text = ""
-            if self.hebrew_classifications:
-                classifications_text = f"\n\nAvailable classifications (choose 1-3 most relevant):\n{', '.join(self.hebrew_classifications)}"
-            
-            # Generate prompt with call ID if enabled
-            if use_call_id_prompt and call_id:
-                # Use template to generate Hebrew prompt with call ID
-                template = lang_templates.get(prompt_template, 'סכם את שיחה מספר {callId}')
-                call_prompt = template.format(callId=call_id)
-                
-                prompt = f"""{call_prompt}
 
-{transcription}{classifications_text}
+        # Escape Hebrew gershayim (double quotes in abbreviations) to prevent JSON breakage
+        # חו"ל contains an ASCII double-quote that breaks JSON parsing
+        transcription = transcription.replace('חו"ל', 'חו״ל')  # Replace with Hebrew gershayim ״
+        transcription = transcription.replace('ש"ח', 'ש״ח')
+        transcription = transcription.replace('ת"ז', 'ת״ז')
+        transcription = transcription.replace('ד"ר', 'ד״ר')
 
-ספק ניתוח מובנה בפורמט JSON הבא. כל הערכים חייבים להיות בעברית:
-{{
-    "callId": "{call_id}",
-    "summary": "סיכום קצר של השיחה בעברית",
-    "classifications": ["הסיווג הרלוונטי ביותר מהרשימה", "סיווג נוסף אם רלוונטי"],
-    "key_points": ["נקודה מרכזית ראשונה בעברית", "נקודה מרכזית שנייה בעברית"],
-    "sentiment": "חיובי" או "שלילי" או "נייטרלי",
-    "products_mentioned": ["שמות מוצרים בעברית אם הוזכרו"],
-    "main_issue": "הבעיה או הצורך המרכזי בעברית",
-    "call_type": "פנייה" או "תלונה" או "בקשה" או "מידע",
-    "action_items": ["פעולות נדרשות בעברית"],
-    "customer_satisfaction": "גבוה" או "בינוני" או "נמוך"
-}}
+        # Truncate very long conversations to prevent context overflow
+        # With num_ctx=16384 tokens and Hebrew ~2.5 chars/token:
+        # - Reserve ~4000 tokens for output, ~2000 for prompt template
+        # - Leaves ~10000 tokens = ~25000 chars for transcription
+        MAX_TRANSCRIPTION_CHARS = 20000  # ~5000 Hebrew words (safe margin for 16K context)
+        if len(transcription) > MAX_TRANSCRIPTION_CHARS:
+            logger.warning(f"⚠️ Truncating transcription from {len(transcription)} to {MAX_TRANSCRIPTION_CHARS} chars")
+            # Keep middle + end (where resolution usually happens), cut beginning
+            transcription = "...[תחילת השיחה קוצרה]...\n" + transcription[-MAX_TRANSCRIPTION_CHARS:]
 
-הגב עם JSON תקין בלבד. תמיד כלול את מספר השיחה ({call_id}) בתשובה."""
-            else:
-                # Original prompt without call ID
-                prompt = f"""נתח את תמליל שיחת השירות הבאה:
+        # Build Hebrew prompt for DictaLM (all calls are Hebrew)
+        categories_list = '\n'.join([f'- {cat}' for cat in self.hebrew_classifications])
+        logger.info(f"📊 Using Hebrew prompt with {len(self.hebrew_classifications)} categories")
 
-{transcription}{classifications_text}
+        call_id_line = f"מזהה שיחה: {call_id}\n" if call_id else ""
 
-ספק ניתוח מובנה בפורמט JSON הבא. כל הערכים חייבים להיות בעברית:
-{{
-    "summary": "סיכום קצר של השיחה בעברית",
-    "classifications": ["הסיווג הרלוונטי ביותר מהרשימה", "סיווג נוסף אם רלוונטי"],
-    "key_points": ["נקודה מרכזית ראשונה בעברית", "נקודה מרכזית שנייה בעברית"],
-    "sentiment": "חיובי" או "שלילי" או "נייטרלי",
-    "products_mentioned": ["שמות מוצרים בעברית אם הוזכרו"],
-    "main_issue": "הבעיה או הצורך המרכזי בעברית",
-    "call_type": "פנייה" או "תלונה" או "בקשה" או "מידע",
-    "action_items": ["פעולות נדרשות בעברית"],
-    "customer_satisfaction": "גבוה" או "בינוני" או "נמוך"
-}}
+        prompt = f"""אתה מומחה לניתוח שיחות - סכם את שיחת שירות הלקוחות של פלאפון. החזר JSON בעברית בלבד.
+A=נציג, C=לקוח. התעלם מ-B (בוט).
 
-הגב עם JSON תקין בלבד."""
-        else:
-            # English system prompt
-            system_prompt = """Analyze customer service calls. 
-Summarize calls and extract important information.
-Always respond in structured JSON format."""
-            
-            # Build classifications list for prompt (English version)
-            classifications_text = ""
-            if self.hebrew_classifications:
-                classifications_text = f"\n\nAvailable classifications:\n{', '.join(self.hebrew_classifications)}"
-            
-            prompt = f"""Analyze the following customer service call transcription and provide a structured summary:
+מדריך סיווג (בחר הקטגוריה המתאימה ביותר):
+- תקלת קליטה = אין קליטה, רשת חלשה, אנטנות, אזור ללא כיסוי
+- תקלת גלישה בארץ = אינטרנט לא עובד, גלישה איטית, חבילת גלישה נגמרה
+- תקלת שיחות יוצאות /נכנסות בארץ = לא מצליח להתקשר או לקבל שיחות
+- סימני נטישה או איום לעזוב = רק אם הלקוח אומר במפורש: "אני עוזב", "רוצה לנתק", "עובר לחברה אחרת"
+- בירור חוב = שאלות על חובות קיימים, תשלומים שלא בוצעו
+- הסבר חשבונית או חיוב = שאלות על חיובים, הבנת החשבונית
+- מעבר תכנית/ מסלול = לקוח רוצה לשנות חבילה או מסלול
+- מידע על חבילת חו״ל = שאלות על חבילות לחו״ל, נסיעות
+- שעון ESIM -תפעול = בעיות עם שעון חכם, eSIM לשעון
+- רכישת מכשיר = לקוח רוצה לקנות טלפון חדש
+- שיחת שיווק או הצעה = רק אם נציג פלאפון התקשר בכדי להציע חבילה
 
-Call transcription:
-{transcription}{classifications_text}
+פורמט JSON (השתמש בשמות האמיתיים מהשיחה בלבד):
+{{"summary": "תיאור קצר של השיחה", "categories": ["קטגוריה"], "sentiment": "חיובי/שלילי/נייטרלי", "products": [], "customer_satisfaction": 1-5, "unresolved_issues": "בעיות שלא נפתרו או ריק"}}
 
-Please provide the analysis in the following JSON format:
-{{
-    "summary": "Brief summary of the call",
-    "classifications": ["Most relevant classification from the list", "Second classification if applicable"],
-    "key_points": ["Important point 1", "Important point 2"],
-    "sentiment": "positive/negative/neutral",
-    "products_mentioned": ["Product 1", "Product 2"],
-    "action_items": ["Required action 1", "Required action 2"],
-    "customer_satisfaction": "high/medium/low",
-    "issue_resolved": true/false,
-    "call_duration_assessment": "appropriate/too_long/too_short"
-}}
+הערכת שביעות רצון (customer_satisfaction):
+1 = מאוד לא מרוצה (כעס, תלונות חריפות)
+2 = לא מרוצה (תסכול, אי שביעות רצון)
+3 = נייטרלי (שיחה עניינית ללא רגש מיוחד)
+4 = מרוצה (תודות, שביעות רצון)
+5 = מאוד מרוצה (שבחים, המלצות)
 
-Ensure the response is valid JSON only."""
-        
+{call_id_line}קטגוריות זמינות:
+{categories_list}
+
+השיחה לסיכום:
+{transcription}"""
+
         try:
+            # Format prompt for DictaLM2.0-instruct with [INST] tags
+            # Note: DictaLM does NOT support system prompts, only user prompts
+            # IMPORTANT: Don't add <s> - Ollama adds BOS token automatically
+            formatted_prompt = f"[INST] {prompt} [/INST]"
+
+            logger.info(f"Using DictaLM instruction format with [INST] tags (no BOS/system prompt)")
+
             response = await self.generate_response(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                temperature=0.1,  # Lower for faster, more deterministic output
-                max_tokens=800  # Increased for complex conversations
+                prompt=formatted_prompt,
+                system_prompt=None,  # Already included in formatted_prompt
+                temperature=0.5,  # Optimized for Hebrew creativity and detail extraction
+                max_tokens=4000  # Increased from 3000 for Hebrew JSON
             )
             
             # Try to parse JSON response
@@ -674,19 +863,275 @@ Ensure the response is valid JSON only."""
                 # Debug: Log raw Ollama response
                 logger.info(f"Raw Ollama response length: {len(response.content)}")
                 logger.info(f"Raw Ollama response: {response.content[:2000]}")  # Increased to see more
-                
+
+                # Check for truncation before parsing
+                content = response.content.strip()
+                open_braces = content.count('{')
+                close_braces = content.count('}')
+
+                if open_braces != close_braces:
+                    logger.error(f"⚠️ JSON TRUNCATION DETECTED! {{ count: {open_braces}, }} count: {close_braces}")
+                    logger.error(f"Response length: {len(content)} chars - likely hit token limit")
+                    logger.error(f"Tokens used: {response.tokens_used if hasattr(response, 'tokens_used') else 'unknown'}")
+
+                    # Check for severe truncation - threshold of 100 chars
+                    if len(content) < 100:
+                        logger.error(f"Severe truncation detected - only {len(content)} chars (threshold: 100)")
+                        # Return FAILURE so app.py doesn't send to downstream queues (Oracle/OpenSearch)
+                        return {
+                            'success': False,  # Changed from True - prevents downstream processing
+                            'error': 'severe_truncation',
+                            'summary': {
+                                'callId': call_id if call_id else 'unknown',
+                                'summary': 'תקלה בניתוח - תגובה קצרה מדי מהמודל',
+                                'classifications': ['לא מסווג'],
+                                'entities': {
+                                    'names': [],
+                                    'phone_numbers': [],
+                                    'account_numbers': [],
+                                    'amounts': [],
+                                    'dates': [],
+                                    'products': []
+                                },
+                                'sentiment': 'נייטרלי',
+                                'main_issue': 'תקלת עיבוד - תגובה קטועה',
+                                'action_items': [],
+                                'customer_satisfaction': 'לא ידוע',
+                                'unresolved_issues': '',
+                                'threats': [],
+                                'error': 'severe_truncation'
+                            },
+                            'callId': call_id if call_id else 'unknown',
+                            'metadata': {
+                                'processing_time': 0,
+                                'model': 'dictalm2.0-instruct:Q4_K_M',
+                                'error': 'severe_truncation',
+                                'original_length': len(content),
+                                'threshold': 250
+                            }
+                        }
+
+                    # Try to auto-complete JSON structure for minor truncation
+                    if open_braces > close_braces:
+                        missing_braces = open_braces - close_braces
+                        content = content + ('}' * missing_braces)
+                        logger.info(f"Added {missing_braces} closing braces to complete JSON")
+
                 # Sanitize Hebrew text before JSON parsing
                 logger.info("Attempting JSON parsing...")
-                sanitized_content = self._sanitize_hebrew_for_json(response.content)
+                sanitized_content = self._sanitize_hebrew_for_json(content)
                 logger.info(f"Sanitized content: {sanitized_content[:1000]}")
                 summary_data = json.loads(sanitized_content)
                 logger.info(f"JSON parsed successfully! Keys: {list(summary_data.keys())}")
+
+                # === NORMALIZE JSON KEYS - DictaLM returns inconsistent casing ===
+                # Supports both English and Hebrew key names
+                key_mapping = {
+                    # English variations (case normalization)
+                    'Summary': 'summary',
+                    'Categories': 'categories',
+                    'Category': 'categories',
+                    'category': 'categories',
+                    'Sentiment': 'sentiment',
+                    'Products': 'products',
+                    'Customer_satisfaction': 'customer_satisfaction',
+                    'Unresolved_issues': 'unresolved_issues',
+                    # Hebrew keys (DictaLM uses these)
+                    'סיכום': 'summary',
+                    'סיכום השיחה': 'summary',
+                    'קטגוריות': 'categories',
+                    'קטגוריה': 'categories',
+                    'רגש': 'sentiment',
+                    'רגשות': 'sentiment',
+                    'מוצרים': 'products',
+                    'שביעות רצון': 'customer_satisfaction',
+                    'שביעות_רצון': 'customer_satisfaction',
+                    'בעיות פתוחות': 'unresolved_issues',
+                    'בעיות שלא נפתרו': 'unresolved_issues',
+                    'שם': '_name',  # Ignore name field if returned
+                }
+                normalized_data = {}
+                for key, value in summary_data.items():
+                    normalized_key = key_mapping.get(key, key.lower())
+                    normalized_data[normalized_key] = value
+                summary_data = normalized_data
+                logger.info(f"Normalized keys: {list(summary_data.keys())}")
+                # === END KEY NORMALIZATION ===
+
                 logger.info(f"Summary field from JSON: {summary_data.get('summary', 'NOT_FOUND')}")
-                
-                # Ensure call ID is included in response
-                if call_id and 'callId' not in summary_data:
+
+                # === REJECT ENGLISH SUMMARIES - Force Hebrew only ===
+                def is_hebrew_text(text: str) -> bool:
+                    """Check if text contains Hebrew characters (at least 30%)"""
+                    if not text:
+                        return False
+                    hebrew_chars = sum(1 for c in text if '\u0590' <= c <= '\u05FF')
+                    return hebrew_chars > len(text) * 0.3
+
+                summary_text = summary_data.get('summary', '')
+                if summary_text and not is_hebrew_text(summary_text):
+                    logger.warning(f"⚠️ REJECTING English summary: {summary_text[:100]}...")
+                    raise Exception("english_summary_rejected")  # Will trigger retry
+                # === END HEBREW VALIDATION ===
+
+                # SIMPLIFIED FORMAT: Only 'summary' is required (categories may be absent)
+                if 'summary' not in summary_data:
+                    logger.error("⚠️ INCOMPLETE JSON - Missing 'summary' field")
+                    return {
+                        'success': False,
+                        'error': 'incomplete_json',
+                        'summary': {
+                            'callId': call_id if call_id else 'unknown',
+                            'summary': 'תקלה בניתוח - JSON חלקי',
+                            'classifications': ['לא מסווג'],
+                            'main_category': 'לא מסווג',
+                            'secondary_category': '',
+                            'entities': {},
+                            'sentiment': 3,
+                            'action_items': [],
+                            'customer_satisfaction': 3,
+                            'unresolved_issues': '',
+                            'threats': ''
+                        },
+                        'callId': call_id if call_id else 'unknown',
+                        'metadata': {
+                            'processing_time': response.processing_time if response else 0,
+                            'model': 'dictalm2.0-instruct:Q4_K_M',
+                            'error': 'missing_summary'
+                        }
+                    }
+
+                # POST-PROCESSING: Convert simplified response to full format
+                # Handle 'categories' - can be string OR list from DictaLM
+                from difflib import get_close_matches, SequenceMatcher
+
+                categories_raw = summary_data.get('categories', '')
+
+                # Handle both list and string formats from DictaLM
+                if isinstance(categories_raw, list):
+                    raw_cats = [str(c).strip() for c in categories_raw if c]
+                elif isinstance(categories_raw, str):
+                    raw_cats = [c.strip() for c in categories_raw.split(',') if c.strip()]
+                else:
+                    raw_cats = []
+                    logger.warning(f"Unexpected categories type: {type(categories_raw)}")
+
+                # === KEYWORD-BASED CLASSIFICATION (pre-LLM backup) ===
+                # Run keyword classification on original transcription
+                keyword_category = self._classify_by_keywords(transcription)
+                if keyword_category:
+                    logger.info(f"🔑 Keyword-based category detected: '{keyword_category}'")
+
+                # Fuzzy match each category - use balanced threshold to avoid bad matches
+                matched = []
+                for cat in raw_cats:
+                    # Try exact match first
+                    if cat in self.hebrew_classifications:
+                        matched.append(cat)
+                        logger.info(f"✅ Exact match: '{cat}'")
+                        continue
+
+                    # Fuzzy match with balanced threshold (0.65) - reject dissimilar categories
+                    matches = get_close_matches(cat, self.hebrew_classifications, n=1, cutoff=0.65)
+                    if matches:
+                        matched.append(matches[0])
+                        logger.info(f"🔍 Fuzzy matched (65%+): '{cat}' → '{matches[0]}'")
+                    else:
+                        # Don't force bad matches - log and skip
+                        logger.warning(f"⚠️ No good match for category '{cat}' (cutoff 0.65) - skipping")
+
+                # === KEYWORD CLASSIFICATION - ALWAYS USE BEST MATCH AS PRIMARY ===
+                # Keywords are more reliable than LLM for specific telecom categories
+                if keyword_category:
+                    if not matched:
+                        # No LLM match - use keyword
+                        matched = [keyword_category]
+                        logger.info(f"🔑 Using keyword classification (LLM had no match): '{keyword_category}'")
+                    elif keyword_category not in matched:
+                        # Keyword found different category - PRIORITIZE KEYWORD as primary
+                        logger.info(f"🔄 Keyword override: '{keyword_category}' beats LLM '{matched[0]}'")
+                        # Put keyword match first (primary), keep LLM match as secondary
+                        matched = [keyword_category] + [m for m in matched if m != keyword_category][:1]
+                    # else: keyword matches LLM - keep as is
+                elif not matched:
+                    # No keyword, no LLM match - use neutral default
+                    matched = ['בירור כללי']
+                    logger.warning(f"No categories found, using neutral default: {matched[0]}")
+
+                # Build full structure for backward compatibility
+                summary_data['classifications'] = matched
+                summary_data['main_category'] = matched[0]
+                summary_data['secondary_category'] = matched[1] if len(matched) > 1 else ''
+                summary_data['is_churn_signal'] = 'נטישה' in matched[0]
+                summary_data['call_type'] = 'inbound_service'
+                summary_data['entities'] = {}
+
+                # === EXTRACT PRODUCTS from LLM response ===
+                products = summary_data.get('products', [])
+                if not products:
+                    products = summary_data.get('מוצרים', [])
+                # Ensure products is always a list
+                if isinstance(products, str):
+                    products = [p.strip() for p in products.split(',') if p.strip()]
+                elif not isinstance(products, list):
+                    products = []
+                summary_data['products'] = products
+                if products:
+                    logger.info(f"📦 Products extracted: {products}")
+                # === END PRODUCTS EXTRACTION ===
+
+                # === PARSE SENTIMENT from LLM response (Hebrew words → 1-5 scale) ===
+                raw_sentiment = summary_data.get('sentiment', 'נייטרלי')
+                if isinstance(raw_sentiment, str):
+                    sentiment_map = {
+                        'חיובי': 4, 'positive': 4,
+                        'שלילי': 2, 'negative': 2,
+                        'נייטרלי': 3, 'neutral': 3,
+                        'מעורב': 3, 'mixed': 3
+                    }
+                    summary_data['sentiment'] = sentiment_map.get(raw_sentiment.lower().strip(), 3)
+                    logger.info(f"📊 Sentiment parsed: '{raw_sentiment}' → {summary_data['sentiment']}")
+                elif isinstance(raw_sentiment, (int, float)):
+                    summary_data['sentiment'] = max(1, min(5, int(raw_sentiment)))
+                else:
+                    summary_data['sentiment'] = 3  # Default only if completely missing
+                # === END SENTIMENT PARSING ===
+
+                summary_data['action_items'] = []
+
+                # === PARSE CUSTOMER SATISFACTION from LLM response (1-5 scale) ===
+                raw_satisfaction = summary_data.get('customer_satisfaction', 3)
+                if isinstance(raw_satisfaction, (int, float)):
+                    summary_data['customer_satisfaction'] = max(1, min(5, int(raw_satisfaction)))
+                elif isinstance(raw_satisfaction, str):
+                    # Try to parse number from string
+                    try:
+                        summary_data['customer_satisfaction'] = max(1, min(5, int(raw_satisfaction.strip())))
+                    except ValueError:
+                        summary_data['customer_satisfaction'] = 3
+                else:
+                    summary_data['customer_satisfaction'] = 3
+                logger.info(f"😊 Customer satisfaction: {summary_data['customer_satisfaction']}")
+                # === END CUSTOMER SATISFACTION ===
+
+                # === PARSE UNRESOLVED ISSUES from LLM response ===
+                unresolved = summary_data.get('unresolved_issues', '')
+                if not unresolved:
+                    unresolved = summary_data.get('בעיות_פתוחות', '')
+                if not unresolved:
+                    unresolved = summary_data.get('בעיות שלא נפתרו', '')
+                summary_data['unresolved_issues'] = str(unresolved) if unresolved else ''
+                if summary_data['unresolved_issues']:
+                    logger.info(f"⚠️ Unresolved issues: {summary_data['unresolved_issues']}")
+                # === END UNRESOLVED ISSUES ===
+
+                summary_data['threats'] = ''
+
+                if call_id:
                     summary_data['callId'] = call_id
-                
+
+                logger.info(f"🎯 FINAL Classifications: {matched}")
+
                 return {
                     'success': True,
                     'summary': summary_data,
@@ -700,6 +1145,8 @@ Ensure the response is valid JSON only."""
                 }
             except json.JSONDecodeError as e:
                 logger.warning(f"Primary JSON parsing failed: {e}")
+                # === CloudWatch Metrics: JSON Parse Error ===
+                cloudwatch_metrics.put_metric('JSONParseErrors', 1)
                 # Fallback: extract JSON from response if it's embedded in text
                 import re
                 json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
@@ -742,7 +1189,14 @@ Ensure the response is valid JSON only."""
             return {
                 'success': False,
                 'error': str(e),
-                'fallback_summary': transcription[:200] + "..." if len(transcription) > 200 else transcription
+                'fallback_summary': {
+                    'summary': 'שגיאה ביצירת סיכום - נדרשת בדיקה ידנית',
+                    'sentiment': 'unknown',
+                    'classifications': ['processing_error'],
+                    'key_points': ['שגיאה בעיבוד אוטומטי'],
+                    'call_type': 'error',
+                    'action_items': ['בדיקה ידנית נדרשת']
+                }
             }
     
     async def test_hebrew_strategies(
