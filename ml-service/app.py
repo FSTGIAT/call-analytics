@@ -17,6 +17,8 @@ from src.services.ollama_service import ollama_service
 from src.services.embedding_service import embedding_service
 # from src.services.weaviate_service import weaviate_service  # Disabled - not using Weaviate
 # from src.services.ml_pipeline import ml_pipeline  # Disabled - causes Weaviate connection attempts
+from src.services.churn_prediction_service import churn_prediction_service
+from src.services.churn_endpoints import churn_bp
 
 # Load environment variables
 load_dotenv('../config/.env.ml')
@@ -216,6 +218,9 @@ sqs_consumer = create_ml_consumer(process_sqs_message)
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False  # Allow non-ASCII characters in JSON responses
 CORS(app)
+
+# Register churn prediction blueprint
+app.register_blueprint(churn_bp)
 
 # Ensure UTF-8 encoding for all responses
 app.config['JSON_AS_ASCII'] = False

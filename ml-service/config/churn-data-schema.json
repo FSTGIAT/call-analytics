@@ -1,0 +1,382 @@
+{
+  "version": "1.0",
+  "description": "Data enrichment schema for improved churn prediction (50% → 90% accuracy)",
+  "baseline_accuracy": {
+    "summary_only": 0.55,
+    "with_sentiment": 0.62,
+    "with_call_history": 0.72,
+    "with_billing": 0.80,
+    "full_data": 0.90
+  },
+  "data_sources": {
+    "required": {
+      "call_summary": {
+        "field": "summary",
+        "type": "string",
+        "language": "hebrew",
+        "description": "סיכום שיחת הלקוח מ-DictaLM",
+        "impact_on_accuracy": 0.30,
+        "example": "הלקוח התקשר בנוגע לבעיות קליטה. מתלונן שכבר שבוע אין לו שירות תקין."
+      },
+      "customer_id": {
+        "field": "customer_id",
+        "type": "string",
+        "description": "מזהה לקוח ייחודי (BAN)",
+        "source": "VERINT_TEXT_ANALYSIS.BAN"
+      },
+      "subscriber_id": {
+        "field": "subscriber_id",
+        "type": "string",
+        "description": "מספר מנוי/קו",
+        "source": "VERINT_TEXT_ANALYSIS.SUBSCRIBER_NO"
+      }
+    },
+    "highly_recommended": {
+      "billing_data": {
+        "description": "נתוני חיוב ותשלום",
+        "impact_on_accuracy": 0.15,
+        "source_system": "Billing System / CRM",
+        "fields": {
+          "current_plan": {
+            "type": "string",
+            "description": "שם החבילה הנוכחית",
+            "example": "חבילה 99 - ללא הגבלה"
+          },
+          "monthly_charge": {
+            "type": "number",
+            "description": "חיוב חודשי בש״ח",
+            "example": 99.00
+          },
+          "overdue_amount": {
+            "type": "number",
+            "description": "סכום חוב פתוח",
+            "example": 150.00,
+            "churn_indicator": "overdue > 100 = high risk"
+          },
+          "payment_method": {
+            "type": "string",
+            "enum": ["credit_card", "bank_transfer", "manual"],
+            "description": "אמצעי תשלום"
+          },
+          "late_payments_count": {
+            "type": "integer",
+            "description": "מספר תשלומים באיחור ב-12 חודשים",
+            "churn_indicator": "count >= 3 = medium risk"
+          },
+          "disputes_count": {
+            "type": "integer",
+            "description": "מספר סכסוכי חיוב פתוחים",
+            "churn_indicator": "count >= 2 = high risk"
+          },
+          "last_plan_change": {
+            "type": "object",
+            "description": "שינוי תוכנית אחרון",
+            "properties": {
+              "date": { "type": "string", "format": "date" },
+              "direction": { "type": "string", "enum": ["upgrade", "downgrade", "same_tier"] },
+              "reason": { "type": "string" }
+            },
+            "churn_indicator": "recent downgrade = high risk"
+          },
+          "discount_requests": {
+            "type": "array",
+            "description": "בקשות הנחה",
+            "items": {
+              "date": { "type": "string" },
+              "approved": { "type": "boolean" },
+              "amount": { "type": "number" }
+            },
+            "churn_indicator": "multiple requests = medium risk"
+          },
+          "lifetime_value": {
+            "type": "number",
+            "description": "ערך לקוח מצטבר (כל התשלומים)",
+            "example": 5000.00
+          },
+          "arpu": {
+            "type": "number",
+            "description": "הכנסה ממוצעת למשתמש (Average Revenue Per User)",
+            "example": 120.00
+          }
+        }
+      },
+      "customer_profile": {
+        "description": "פרופיל לקוח",
+        "impact_on_accuracy": 0.12,
+        "source_system": "CRM",
+        "fields": {
+          "tenure_months": {
+            "type": "integer",
+            "description": "ותק בחודשים",
+            "churn_indicator": "tenure < 6 = higher risk, tenure > 24 = lower risk"
+          },
+          "contract_status": {
+            "type": "string",
+            "enum": ["active_commitment", "month_to_month", "ending_soon"],
+            "description": "סטטוס התחייבות",
+            "churn_indicator": "ending_soon = very high risk"
+          },
+          "contract_end_date": {
+            "type": "string",
+            "format": "date",
+            "description": "תאריך סיום התחייבות"
+          },
+          "lines_count": {
+            "type": "integer",
+            "description": "מספר קווים/מנויים",
+            "churn_indicator": "more lines = lower churn risk"
+          },
+          "segment": {
+            "type": "string",
+            "enum": ["premium", "business", "standard", "basic"],
+            "description": "סגמנט לקוח"
+          },
+          "acquisition_channel": {
+            "type": "string",
+            "description": "ערוץ גיוס",
+            "example": "online, store, telemarketing"
+          },
+          "nps_score": {
+            "type": "integer",
+            "min": 0,
+            "max": 10,
+            "description": "ציון NPS אחרון",
+            "churn_indicator": "score <= 6 (detractor) = high risk"
+          }
+        }
+      },
+      "call_history": {
+        "description": "היסטוריית שיחות",
+        "impact_on_accuracy": 0.18,
+        "source_system": "VERINT_TEXT_ANALYSIS / OpenSearch",
+        "fields": {
+          "calls_last_30_days": {
+            "type": "integer",
+            "description": "מספר שיחות ב-30 יום",
+            "churn_indicator": "count >= 5 = medium risk (unresolved issues)"
+          },
+          "calls_last_90_days": {
+            "type": "integer",
+            "description": "מספר שיחות ב-90 יום"
+          },
+          "recent_calls": {
+            "type": "array",
+            "description": "שיחות אחרונות",
+            "items": {
+              "call_id": { "type": "string" },
+              "timestamp": { "type": "string", "format": "date-time" },
+              "classification": { "type": "string" },
+              "sentiment": { "type": "string" },
+              "was_resolved": { "type": "boolean" },
+              "churn_mentioned": { "type": "boolean" }
+            }
+          },
+          "repeated_issues": {
+            "type": "array",
+            "description": "בעיות שחזרו על עצמן",
+            "items": {
+              "issue_type": { "type": "string" },
+              "occurrence_count": { "type": "integer" }
+            },
+            "churn_indicator": "any issue >= 3 times = high risk"
+          },
+          "avg_sentiment": {
+            "type": "number",
+            "description": "סנטימנט ממוצע (-1 to 1)"
+          },
+          "sentiment_trend": {
+            "type": "string",
+            "enum": ["improving", "stable", "declining"],
+            "churn_indicator": "declining = high risk"
+          }
+        }
+      },
+      "service_data": {
+        "description": "נתוני שירות ותקלות",
+        "impact_on_accuracy": 0.10,
+        "source_system": "Network Operations / Ticketing System",
+        "fields": {
+          "outages_last_30_days": {
+            "type": "integer",
+            "description": "מספר תקלות ב-30 יום",
+            "churn_indicator": "count >= 3 = high risk"
+          },
+          "technician_visits": {
+            "type": "integer",
+            "description": "ביקורי טכנאי ב-90 יום",
+            "churn_indicator": "count >= 2 = medium risk"
+          },
+          "open_tickets": {
+            "type": "integer",
+            "description": "תקלות פתוחות"
+          },
+          "avg_ticket_resolution_days": {
+            "type": "number",
+            "description": "זמן פתרון ממוצע בימים"
+          },
+          "coverage_quality": {
+            "type": "string",
+            "enum": ["excellent", "good", "fair", "poor"],
+            "description": "איכות כיסוי באזור הלקוח"
+          },
+          "speed_complaints": {
+            "type": "integer",
+            "description": "תלונות על מהירות"
+          },
+          "device_type": {
+            "type": "string",
+            "description": "סוג מכשיר",
+            "example": "iPhone 14 Pro"
+          },
+          "device_age_months": {
+            "type": "integer",
+            "description": "גיל המכשיר בחודשים",
+            "churn_indicator": "device_age > 24 = lower switching cost = higher risk"
+          }
+        }
+      }
+    },
+    "nice_to_have": {
+      "usage_data": {
+        "description": "נתוני שימוש",
+        "impact_on_accuracy": 0.05,
+        "source_system": "Usage Analytics",
+        "fields": {
+          "data_usage_gb": {
+            "type": "number",
+            "description": "שימוש בנתונים בחודש (GB)"
+          },
+          "data_usage_vs_plan": {
+            "type": "number",
+            "description": "אחוז ניצול מהחבילה",
+            "churn_indicator": "usage < 30% = overpaying = high risk"
+          },
+          "voice_minutes": {
+            "type": "integer",
+            "description": "דקות שיחה בחודש"
+          },
+          "sms_count": {
+            "type": "integer",
+            "description": "הודעות SMS בחודש"
+          },
+          "international_usage": {
+            "type": "boolean",
+            "description": "האם משתמש בחו״ל"
+          },
+          "app_usage_frequency": {
+            "type": "string",
+            "enum": ["daily", "weekly", "monthly", "never"],
+            "description": "תדירות שימוש באפליקציה",
+            "churn_indicator": "never = low engagement = higher risk"
+          }
+        }
+      },
+      "marketing_data": {
+        "description": "נתוני שיווק",
+        "impact_on_accuracy": 0.03,
+        "source_system": "Marketing Automation",
+        "fields": {
+          "campaign_responses": {
+            "type": "array",
+            "description": "תגובות לקמפיינים"
+          },
+          "offer_click_rate": {
+            "type": "number",
+            "description": "שיעור קליקים על הצעות"
+          },
+          "opted_out_marketing": {
+            "type": "boolean",
+            "description": "ביטל קבלת מסרים שיווקיים"
+          }
+        }
+      },
+      "competitive_intelligence": {
+        "description": "מידע על מתחרים",
+        "impact_on_accuracy": 0.02,
+        "source_system": "External / Social Listening",
+        "fields": {
+          "competitor_mentions": {
+            "type": "array",
+            "description": "אזכורי מתחרים בשיחות"
+          },
+          "competitor_offers_received": {
+            "type": "boolean",
+            "description": "האם קיבל הצעות ממתחרים"
+          }
+        }
+      }
+    }
+  },
+  "churn_indicators_summary": {
+    "critical_risk_indicators": [
+      "explicit_churn_keywords_detected",
+      "competitor_mentions",
+      "contract_ending_within_30_days",
+      "nps_score_0_to_6",
+      "declining_sentiment_trend"
+    ],
+    "high_risk_indicators": [
+      "overdue_amount_over_100",
+      "disputes_count_over_2",
+      "recent_plan_downgrade",
+      "outages_over_3_in_30_days",
+      "repeated_unresolved_issues"
+    ],
+    "medium_risk_indicators": [
+      "calls_over_5_in_30_days",
+      "late_payments_over_3",
+      "multiple_discount_requests",
+      "technician_visits_over_2",
+      "low_data_usage_vs_plan"
+    ],
+    "low_risk_indicators": [
+      "tenure_over_24_months",
+      "multiple_lines",
+      "active_commitment",
+      "high_engagement",
+      "positive_sentiment_trend"
+    ]
+  },
+  "integration_recommendations": {
+    "phase_1": {
+      "description": "מיידי - שיפור של 10-15%",
+      "data_sources": ["call_history", "existing_classifications"],
+      "implementation": "Connect to OpenSearch for historical call data"
+    },
+    "phase_2": {
+      "description": "טווח קצר - שיפור נוסף של 10%",
+      "data_sources": ["billing_data", "customer_profile"],
+      "implementation": "API integration with billing system"
+    },
+    "phase_3": {
+      "description": "טווח בינוני - שיפור נוסף של 5%",
+      "data_sources": ["service_data", "usage_data"],
+      "implementation": "Integration with NOC and analytics systems"
+    },
+    "phase_4": {
+      "description": "אופטימיזציה - שיפור נוסף של 3-5%",
+      "data_sources": ["marketing_data", "competitive_intelligence"],
+      "implementation": "Marketing automation and social listening integration"
+    }
+  },
+  "alephbert_similarity_usage": {
+    "description": "שימוש ב-AlephBERT לזיהוי דפוסים דומים",
+    "implementation": {
+      "step_1": "אסוף סיכומים של לקוחות שעזבו עם סיבת עזיבה",
+      "step_2": "צור embeddings (768-dim) לכל סיכום",
+      "step_3": "אחסן ב-FAISS index לחיפוש מהיר",
+      "step_4": "כשמגיע סיכום חדש, חפש דמיון לדפוסי עזיבה",
+      "step_5": "דמיון > 70% = סימן אזהרה משמעותי"
+    },
+    "clustering": {
+      "description": "קיבוץ דפוסי עזיבה דומים",
+      "use_case": "זיהוי קטגוריות עזיבה נפוצות",
+      "example_clusters": [
+        "בעיות מחיר ותחרות",
+        "תקלות טכניות חוזרות",
+        "שירות לקוחות גרוע",
+        "סיום התחייבות"
+      ]
+    }
+  }
+}
