@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="400" height="500" viewBox="0 0 400 500" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Gradient for nodes -->
+    <linearGradient id="nodeGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#93C5FD;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#60A5FA;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Gradient for paths -->
+    <linearGradient id="pathGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#93C5FD;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3B82F6;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Glow effect -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Dark Background -->
+  <rect width="400" height="500" fill="#0F172A"/>
+
+  <!-- P-Shape Journey Path -->
+  <g transform="translate(100, 40)" filter="url(#glow)">
+    <!-- Horizontal top line -->
+    <line x1="30" y1="30" x2="150" y2="30" stroke="url(#pathGradient)" stroke-width="4" stroke-linecap="round"/>
+
+    <!-- Right curve down -->
+    <path d="M 150 30 Q 190 30 190 70 Q 190 110 150 110" fill="none" stroke="url(#pathGradient)" stroke-width="4" stroke-linecap="round"/>
+
+    <!-- Horizontal middle line -->
+    <line x1="30" y1="110" x2="150" y2="110" stroke="url(#pathGradient)" stroke-width="4" stroke-linecap="round"/>
+
+    <!-- Vertical stem -->
+    <line x1="30" y1="30" x2="30" y2="250" stroke="url(#pathGradient)" stroke-width="4" stroke-linecap="round"/>
+
+    <!-- Journey Nodes -->
+    <circle cx="30" cy="30" r="14" fill="url(#nodeGradient)"/>
+    <circle cx="30" cy="30" r="6" fill="#0F172A"/>
+
+    <circle cx="150" cy="30" r="14" fill="url(#nodeGradient)"/>
+    <circle cx="150" cy="30" r="6" fill="#0F172A"/>
+
+    <circle cx="190" cy="70" r="14" fill="url(#nodeGradient)"/>
+    <circle cx="190" cy="70" r="6" fill="#0F172A"/>
+
+    <circle cx="150" cy="110" r="14" fill="url(#nodeGradient)"/>
+    <circle cx="150" cy="110" r="6" fill="#0F172A"/>
+
+    <circle cx="30" cy="110" r="14" fill="url(#nodeGradient)"/>
+    <circle cx="30" cy="110" r="6" fill="#0F172A"/>
+
+    <circle cx="30" cy="170" r="14" fill="url(#nodeGradient)"/>
+    <circle cx="30" cy="170" r="6" fill="#0F172A"/>
+
+    <!-- Bottom node (insight point) - brighter -->
+    <circle cx="30" cy="250" r="18" fill="#60A5FA"/>
+    <circle cx="30" cy="250" r="10" fill="#93C5FD"/>
+    <circle cx="30" cy="250" r="5" fill="white"/>
+  </g>
+
+  <!-- MAPPI Text -->
+  <text x="200" y="370" font-family="Arial, Helvetica, sans-serif" font-size="56" font-weight="bold" fill="#93C5FD" text-anchor="middle">
+    MAPPI
+  </text>
+
+  <!-- Hebrew Text -->
+  <text x="200" y="415" font-family="Arial, Helvetica, sans-serif" font-size="32" fill="#60A5FA" text-anchor="middle">
+    מאפי
+  </text>
+
+  <!-- Tagline -->
+  <text x="200" y="455" font-family="Arial, Helvetica, sans-serif" font-size="18" fill="#64748B" text-anchor="middle" letter-spacing="4">
+    MAPPING
+  </text>
+</svg>
