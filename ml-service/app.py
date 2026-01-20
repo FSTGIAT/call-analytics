@@ -1,8 +1,12 @@
 import os
+import json
 import logging
 import signal
 import atexit
+import threading
+import time
 import numpy as np
+import boto3
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -15,6 +19,9 @@ from src.services.ollama_service import ollama_service
 # from src.services.huggingface_service import huggingface_service  # Using Ollama instead
 # from src.services.bedrock_service import bedrock_service  # Removed - not using Bedrock
 from src.services.embedding_service import embedding_service
+
+# Import embedding classifier for fast classification (~50ms vs 6+ seconds with LLM)
+from src.services.embedding_classifier import create_embedding_classifier, get_embedding_classifier
 # from src.services.weaviate_service import weaviate_service  # Disabled - not using Weaviate
 # from src.services.ml_pipeline import ml_pipeline  # Disabled - causes Weaviate connection attempts
 
@@ -114,12 +121,36 @@ async def process_sqs_message(message_data):
 
         # Prepare ML result data (works for both success and fallback)
         sqs_producer = get_sqs_producer()
+
+        # Extract customer_satisfaction (1-5 rating from DictaLM)
+        customer_satisfaction = summary_data.get('customer_satisfaction', 3)
+        # Convert to float score (1-5 → 0.2-1.0)
+        satisfaction_score = customer_satisfaction / 5.0 if isinstance(customer_satisfaction, (int, float)) else 0.6
+
+        # Extract products - ensure it's a JSON string for Oracle CLOB
+        products_list = summary_data.get('products', [])
+        products_str = json.dumps(products_list, ensure_ascii=False) if isinstance(products_list, list) else str(products_list)
+
+        # Extract action_items - ensure it's a JSON string for Oracle CLOB
+        action_items_list = summary_data.get('action_items', [])
+        action_items_str = json.dumps(action_items_list, ensure_ascii=False) if isinstance(action_items_list, list) else str(action_items_list)
+
+        # Extract sentiment as number (1-5 scale, default 3 for neutral)
+        sentiment_raw = summary_data.get('sentiment', 3)
+        if isinstance(sentiment_raw, str):
+            # Convert string sentiment to number
+            sentiment_map = {'חיובי': 4, 'positive': 4, 'שלילי': 2, 'negative': 2,
+                           'נייטרלי': 3, 'neutral': 3, 'מעורב': 3, 'mixed': 3}
+            sentiment_num = sentiment_map.get(sentiment_raw.lower().strip(), 3)
+        else:
+            sentiment_num = int(sentiment_raw) if sentiment_raw else 3
+
         ml_result = {
             'callId': call_id,
             'summary': summary_data.get('summary', 'שגיאה ביצירת סיכום - נדרשת בדיקה ידנית'),
             'sentiment': {
-                'overall': summary_data.get('sentiment', 'neutral'),
-                'score': 0.8 if is_success else 0.5
+                'overall': sentiment_num,  # Always numeric (1-5)
+                'score': satisfaction_score if is_success else 0.5
             },
             'classification': {
                 'primary': summary_data.get('classifications', ['general_inquiry'])[0] if summary_data.get('classifications') else 'general_inquiry',
@@ -128,9 +159,17 @@ async def process_sqs_message(message_data):
             'classifications': summary_data.get('classifications', ['requires_manual_review'] if not is_success else []),
             'confidence': 0.85 if is_success else 0.3,  # Lower confidence for fallback
             'keyPoints': summary_data.get('key_points', ['LLM processing failed - manual review required'] if not is_success else []),
-            'actionItems': summary_data.get('action_items', ['Manual review required'] if not is_success else []),
+            'actionItems': action_items_list,  # Keep as list for OpenSearch
             'processingTime': result.get('metadata', {}).get('processing_time', 0) * 1000 if is_success else 0,
-            'processingError': error_msg if not is_success else None
+            'processingError': error_msg if not is_success else None,
+            # === NEW FIELDS from DictaLM for CONVERSATION_SUMMARY table ===
+            'products': products_str,  # JSON string for Oracle
+            'customer_satisfaction': customer_satisfaction,  # 1-5 rating
+            'unresolved_issues': summary_data.get('unresolved_issues', ''),
+            'action_items': action_items_str,  # JSON string for Oracle (snake_case for CDC)
+            # === CHURN DETECTION (independent of classification) ===
+            'is_churn': summary_data.get('is_churn', False),
+            'churn_confidence': summary_data.get('churn_confidence', 0.0),
         }
 
         # 1. Send to SQS for CDC service to save to local Oracle database
@@ -234,7 +273,30 @@ try:
         # Generate a dummy embedding to initialize CUDA
         result = await embedding_service.generate_batch_embeddings(["שלום"])
         logger.info("✅ Embedding service and CUDA initialized successfully")
-    
+
+        # === INITIALIZE EMBEDDING CLASSIFIER ===
+        # Create and initialize the fast embedding-based classifier (~50ms vs 6+ seconds with LLM)
+        logger.info("🚀 Initializing embedding classifier for fast call classification...")
+        embedding_classifier = create_embedding_classifier(embedding_service)
+
+        # Initialize with categories and keywords
+        classifications_path = '/app/config/call-classifications.json'
+        keywords_path = '/app/config/classification-keywords.json'
+
+        success = await embedding_classifier.initialize(
+            classifications_path=classifications_path,
+            keywords_path=keywords_path
+        )
+
+        if success:
+            # Set the classifier on the ollama_service for use in summarize_call
+            ollama_service.set_embedding_classifier(embedding_classifier)
+            logger.info(f"✅ Embedding classifier initialized with {len(embedding_classifier.categories)} categories")
+            stats = embedding_classifier.get_stats()
+            logger.info(f"   Stats: {stats}")
+        else:
+            logger.error("❌ Failed to initialize embedding classifier - falling back to LLM classification")
+
     # Run the async initialization
     asyncio.get_event_loop().run_until_complete(init_embedding_service())
 except Exception as e:
@@ -259,7 +321,17 @@ def health_check():
     """Health check endpoint."""
     # Check SQS consumer health
     sqs_health = sqs_consumer.health_check()
-    
+
+    # Check embedding classifier health
+    embedding_classifier = get_embedding_classifier()
+    embedding_classifier_status = {
+        'status': 'healthy' if embedding_classifier and embedding_classifier.initialized else 'not_initialized',
+        'categories': len(embedding_classifier.categories) if embedding_classifier else 0,
+        'keywords': len(embedding_classifier.keywords) if embedding_classifier else 0
+    }
+    if embedding_classifier and embedding_classifier.initialized:
+        embedding_classifier_status['stats'] = embedding_classifier.get_stats()
+
     # Use synchronous health check for now
     pipeline_health = {
         'pipeline_status': 'healthy',
@@ -268,10 +340,11 @@ def health_check():
             'embeddings': {'status': 'healthy'},
             'llm': {'status': 'healthy'},
             'hebrew_support': {'status': 'native', 'note': 'Built into DictaLM and AlephBERT'},
+            'embedding_classifier': embedding_classifier_status,
             'sqs_consumer': sqs_health
         }
     }
-    
+
     return jsonify({
         'status': pipeline_health['pipeline_status'],
         'service': 'ml-service',
@@ -1371,6 +1444,126 @@ async def test_pipeline():
         }), 500
 
 
+# ========================================
+# CONFIG RELOAD LISTENER (Background Thread)
+# ========================================
+
+# Global flag to control the config listener thread
+config_listener_running = False
+config_listener_thread = None
+
+
+def start_config_listener():
+    """
+    Background thread that listens for config update notifications from SQS.
+    Downloads configs from S3 and triggers safe reload when triggered manually
+    from the dashboard via "Apply to ML" button.
+
+    This allows hot-reloading of ML configurations without service restart.
+    """
+    global config_listener_running
+    config_listener_running = True
+
+    # AWS clients
+    sqs = boto3.client('sqs', region_name='eu-west-1')
+    s3 = boto3.client('s3', region_name='eu-west-1')
+
+    # Configuration
+    queue_url = os.getenv('CONFIG_SQS_QUEUE',
+        'https://sqs.eu-west-1.amazonaws.com/320708867194/ml-config-updates')
+    bucket = os.getenv('CONFIG_S3_BUCKET', 'pelephone-ml-configs')
+
+    logger.info(f"Config listener started - polling {queue_url}")
+
+    while config_listener_running:
+        try:
+            # Long-poll SQS (20 seconds)
+            response = sqs.receive_message(
+                QueueUrl=queue_url,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=20,
+                MessageAttributeNames=['All']
+            )
+
+            messages = response.get('Messages', [])
+
+            for msg in messages:
+                try:
+                    body = json.loads(msg.get('Body', '{}'))
+                    triggered_by = body.get('triggered_by', 'unknown')
+                    action = body.get('action', 'reload_configs')
+
+                    logger.info(f"Config update received - action: {action}, triggered by: {triggered_by}")
+
+                    if action == 'reload_configs':
+                        # Download configs from S3
+                        configs = {}
+                        config_files = [
+                            'configs/call-classifications.json',
+                            'configs/classification-keywords.json'
+                        ]
+
+                        for config_key in config_files:
+                            try:
+                                obj = s3.get_object(Bucket=bucket, Key=config_key)
+                                config_data = json.loads(obj['Body'].read().decode('utf-8'))
+                                # Extract filename from key
+                                filename = config_key.split('/')[-1]
+                                configs[filename] = config_data
+                                logger.info(f"   Downloaded {filename} from S3")
+                            except Exception as e:
+                                logger.warning(f"   Could not download {config_key}: {e}")
+
+                        # Get the embedding classifier and trigger safe reload
+                        embedding_classifier = get_embedding_classifier()
+
+                        if embedding_classifier:
+                            # Run async reload in the current event loop
+                            import asyncio
+                            try:
+                                loop = asyncio.get_event_loop()
+                            except RuntimeError:
+                                loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(loop)
+
+                            success = loop.run_until_complete(
+                                embedding_classifier.reload_configs_safe(
+                                    classifications_data=configs.get('call-classifications.json'),
+                                    keywords_data=configs.get('classification-keywords.json')
+                                )
+                            )
+
+                            if success:
+                                logger.info("ML service configs reloaded successfully - ZERO DISRUPTION")
+                            else:
+                                logger.warning("Config reload failed - keeping old config")
+                        else:
+                            logger.error("Embedding classifier not available for reload")
+
+                    # Delete processed message
+                    sqs.delete_message(
+                        QueueUrl=queue_url,
+                        ReceiptHandle=msg['ReceiptHandle']
+                    )
+                    logger.info(f"Config update processed and message deleted")
+
+                except Exception as e:
+                    logger.error(f"Error processing config update message: {e}")
+
+        except Exception as e:
+            if config_listener_running:  # Only log if not shutting down
+                logger.error(f"Config listener error: {e}")
+                time.sleep(5)  # Wait before retrying
+
+    logger.info("Config listener stopped")
+
+
+def stop_config_listener():
+    """Stop the config listener thread gracefully."""
+    global config_listener_running
+    config_listener_running = False
+
+
 async def pre_warm_models():
     """Pre-warm all ML models during startup to eliminate cold start delays."""
     try:
@@ -1424,13 +1617,19 @@ async def pre_warm_models():
 
 def shutdown_handler(signum=None, frame=None):
     """Gracefully shutdown the application and SQS consumer."""
-    logger.info("🛑 Shutdown signal received - cleaning up...")
+    logger.info("Shutdown signal received - cleaning up...")
+    try:
+        # Stop config listener thread
+        stop_config_listener()
+        logger.info("Config listener stopped")
+    except Exception as e:
+        logger.error(f"Error stopping config listener: {e}")
     try:
         sqs_consumer.stop()
-        logger.info("✅ SQS consumer stopped gracefully")
+        logger.info("SQS consumer stopped gracefully")
     except Exception as e:
-        logger.error(f"❌ Error stopping SQS consumer: {e}")
-    logger.info("👋 ML Service shutdown complete")
+        logger.error(f"Error stopping SQS consumer: {e}")
+    logger.info("ML Service shutdown complete")
 
 
 if __name__ == '__main__':
@@ -1453,11 +1652,21 @@ if __name__ == '__main__':
     loop.close()
     
     # Start SQS consumer after model pre-warming
-    logger.info("🚀 Starting SQS consumer service...")
+    logger.info("Starting SQS consumer service...")
     if sqs_consumer.start():
-        logger.info("✅ SQS consumer started successfully")
+        logger.info("SQS consumer started successfully")
     else:
-        logger.warning("⚠️ SQS consumer failed to start - service will continue with REST-only mode")
-    
-    logger.info("🔥 All models pre-warmed - starting Flask server...")
+        logger.warning("SQS consumer failed to start - service will continue with REST-only mode")
+
+    # Config listener disabled - restart ml-service manually after config changes
+    # To enable: set ENABLE_CONFIG_LISTENER=true in environment
+    if os.environ.get('ENABLE_CONFIG_LISTENER', 'false').lower() == 'true':
+        logger.info("Starting config listener for hot reload support...")
+        config_listener_thread = threading.Thread(target=start_config_listener, daemon=True)
+        config_listener_thread.start()
+        logger.info("Config listener thread started - listening for S3 config updates")
+    else:
+        logger.info("Config listener DISABLED (manual restart required for config updates)")
+
+    logger.info("All models pre-warmed - starting Flask server...")
     app.run(host='0.0.0.0', port=port, debug=debug)

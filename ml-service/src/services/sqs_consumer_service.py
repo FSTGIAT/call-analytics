@@ -128,52 +128,108 @@ class SQSConsumerService:
                 time.sleep(5)  # Wait before retrying
     
     def _process_messages(self, messages: List[Dict[str, Any]]):
-        """Process a batch of messages"""
+        """Process a batch of messages in parallel"""
+        if not self.message_processor:
+            logger.warning("No message processor configured")
+            return
+
+        # Check if processor is async - use parallel processing
+        if inspect.iscoroutinefunction(self.message_processor):
+            # Get or create event loop
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            # Process all messages in parallel
+            start_time = time.time()
+            loop.run_until_complete(self._process_messages_parallel(messages))
+            elapsed = time.time() - start_time
+            logger.info(f"Parallel processed {len(messages)} messages in {elapsed:.2f}s")
+        else:
+            # Fallback to sequential for sync processors
+            self._process_messages_sequential(messages)
+
+    async def _process_messages_parallel(self, messages: List[Dict[str, Any]]):
+        """Process multiple messages concurrently using asyncio.gather"""
+        tasks = []
+        for message in messages:
+            task = self._process_single_message_async(message)
+            tasks.append(task)
+
+        # Execute all tasks in parallel
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Log any exceptions
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Message {i} failed with exception: {result}")
+
+    async def _process_single_message_async(self, message: Dict[str, Any]) -> bool:
+        """Process a single message asynchronously"""
+        try:
+            body = json.loads(message.get('Body', '{}'))
+            message_id = message.get('MessageId')
+            receipt_handle = message.get('ReceiptHandle')
+
+            logger.debug(f"Processing message {message_id}")
+
+            # Process the message (async)
+            result = await self.message_processor(body)
+
+            if result:
+                # Delete message on successful processing
+                self.sqs_client.delete_message(
+                    QueueUrl=self.queue_url,
+                    ReceiptHandle=receipt_handle
+                )
+                self.processed_count += 1
+                logger.info(f"Successfully processed message {message_id}")
+                return True
+            else:
+                logger.warning(f"Message processor returned False for message {message_id}")
+                self.failed_count += 1
+                return False
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse message JSON: {e}")
+            self.failed_count += 1
+            return False
+
+        except Exception as e:
+            logger.error(f"Failed to process message: {e}")
+            self.failed_count += 1
+            self.last_error = str(e)
+            return False
+
+    def _process_messages_sequential(self, messages: List[Dict[str, Any]]):
+        """Process messages sequentially (fallback for sync processors)"""
         for message in messages:
             try:
-                # Extract message body
                 body = json.loads(message.get('Body', '{}'))
                 message_id = message.get('MessageId')
                 receipt_handle = message.get('ReceiptHandle')
-                
+
                 logger.debug(f"Processing message {message_id}")
-                
-                # Process the message
-                if self.message_processor:
-                    # Check if processor is async
-                    if inspect.iscoroutinefunction(self.message_processor):
-                        # Run async processor in event loop
-                        loop = None
-                        try:
-                            loop = asyncio.get_event_loop()
-                        except RuntimeError:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                        
-                        result = loop.run_until_complete(self.message_processor(body))
-                    else:
-                        # Run sync processor
-                        result = self.message_processor(body)
-                    
-                    if result:
-                        # Delete message on successful processing
-                        self.sqs_client.delete_message(
-                            QueueUrl=self.queue_url,
-                            ReceiptHandle=receipt_handle
-                        )
-                        
-                        self.processed_count += 1
-                        logger.info(f"Successfully processed message {message_id}")
-                    else:
-                        logger.warning(f"Message processor returned False for message {message_id}")
-                        self.failed_count += 1
+
+                result = self.message_processor(body)
+
+                if result:
+                    self.sqs_client.delete_message(
+                        QueueUrl=self.queue_url,
+                        ReceiptHandle=receipt_handle
+                    )
+                    self.processed_count += 1
+                    logger.info(f"Successfully processed message {message_id}")
                 else:
-                    logger.warning("No message processor configured")
-                
+                    logger.warning(f"Message processor returned False for message {message_id}")
+                    self.failed_count += 1
+
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse message JSON: {e}")
                 self.failed_count += 1
-                
+
             except Exception as e:
                 logger.error(f"Failed to process message: {e}")
                 self.failed_count += 1

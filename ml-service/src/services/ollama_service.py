@@ -16,6 +16,9 @@ from .classification_keywords import detect_call_direction
 # Import CloudWatch metrics service
 from .cloudwatch_metrics_service import cloudwatch_metrics
 
+# Import embedding classifier for fast classification (~50ms vs 6+ seconds with LLM)
+from .embedding_classifier import EmbeddingClassifier, get_embedding_classifier
+
 logger = logging.getLogger(__name__)
 
 
@@ -165,7 +168,9 @@ class OllamaService:
             if os.path.exists(classifications_path):
                 with open(classifications_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                    self.hebrew_classifications = config.get('classifications', [])
+                    raw_classifications = config.get('classifications', [])
+                    # Handle both old format (strings) and new format (objects with name)
+                    self.hebrew_classifications = self._extract_classification_names(raw_classifications)
                     logger.info(f"✅ Loaded {len(self.hebrew_classifications)} call classifications on startup")
             else:
                 logger.warning(f"Classifications file not found at {classifications_path}")
@@ -220,6 +225,42 @@ class OllamaService:
         
         logger.info(f"Ollama service initialized with model: {self.config.model_name}")
         logger.info(f"Hebrew model configured: {self.hebrew_model} (enabled: {self.use_dictalm_for_hebrew})")
+
+        # Embedding classifier (will be set during app initialization)
+        self._embedding_classifier: Optional[EmbeddingClassifier] = None
+
+    def set_embedding_classifier(self, classifier: EmbeddingClassifier):
+        """Set the embedding classifier for fast classification."""
+        self._embedding_classifier = classifier
+        logger.info("✅ Embedding classifier set in OllamaService")
+
+    def get_embedding_classifier(self) -> Optional[EmbeddingClassifier]:
+        """Get the embedding classifier instance."""
+        return self._embedding_classifier
+
+    def _extract_classification_names(self, classifications: list) -> List[str]:
+        """
+        Extract category names from classifications list.
+        Handles both old format (list of strings) and new format (list of objects with name).
+        """
+        if not classifications:
+            return []
+
+        # Check if new format (objects) or old format (strings)
+        if isinstance(classifications[0], str):
+            return classifications
+
+        # New format: extract 'name' from each object
+        names = []
+        for cat in classifications:
+            if isinstance(cat, dict):
+                name = cat.get('name', '')
+                if name:
+                    names.append(name)
+            elif isinstance(cat, str):
+                names.append(cat)
+
+        return names
 
     def _classify_by_keywords(self, transcription: str) -> Optional[str]:
         """
@@ -374,42 +415,61 @@ class OllamaService:
         """
         Sanitize Hebrew text to prevent JSON parsing errors.
         Comprehensive fix for Hebrew punctuation and JSON structure issues.
+
+        CRITICAL: Hebrew abbreviations like חו"ל and ש"ח contain unescaped quotes
+        that break JSON parsing. We MUST fix these BEFORE attempting to parse.
         """
         import re
         import json
-        
+
         # Remove control characters that definitely break JSON
         text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
-        
-        # Try parsing first - if it works, return as-is
+
+        # ALWAYS apply Hebrew abbreviation fixes FIRST - don't wait for JSON failure
+        # These patterns contain quotes that break JSON structure
+        hebrew_abbreviation_fixes = [
+            ('חו"ל', 'חול'),
+            ('חו״ל', 'חול'),
+            ('ש"ח', 'שח'),
+            ('ש״ח', 'שח'),
+            ('ח"כ', 'חכ'),
+            ('מ"ר', 'מר'),
+            ('ד"ר', 'דר'),
+            ('ד״ר', 'דר'),
+            ('ח"י', 'חי'),
+            ('א"ב', 'אב'),
+            ('מ"מ', 'מם'),
+            ('ת"ד', 'תד'),
+            ('ת"ז', 'תז'),
+            ('ת״ז', 'תז'),
+            ('חשכ"ל', 'חשכל'),
+            ('חשכ״ל', 'חשכל'),
+            ('ע"י', 'עי'),
+            ('ע״י', 'עי'),
+            ('כ"א', 'כא'),
+            ('בע"מ', 'בעמ'),
+            ('וכו"', 'וכו'),
+            ('וכו״', 'וכו'),
+        ]
+
+        for pattern, replacement in hebrew_abbreviation_fixes:
+            text = text.replace(pattern, replacement)
+
+        # Remove any remaining internal Hebrew quotes (letter"letter or letter״letter)
+        text = re.sub(r'([א-ת])["״]([א-ת])', r'\1\2', text)
+
+        logger.debug(f"After Hebrew quote sanitization: {text[:500]}...")
+
+        # Try parsing now - if it works, return
         try:
             json.loads(text)
-            return text  # Already valid JSON
+            return text  # Valid JSON after Hebrew fixes
         except json.JSONDecodeError as e:
-            logger.info(f"JSON needs fixing: {e}")
-            
-            # Step 1: Fix Hebrew gershayim (double quotes) - be more comprehensive
-            hebrew_fixes = [
-                ('חו"ל', 'חו\\"ל'),
-                ('ש"ח', 'ש\\"ח'), 
-                ('ח"כ', 'ח\\"כ'),
-                ('מ"ר', 'מ\\"ר'),
-                ('ד"ר', 'ד\\"ר'),
-                ('ח"י', 'ח\\"י'),
-                ('א"ב', 'א\\"ב'),
-                ('מ"מ', 'מ\\"מ'),
-                ('ת"ד', 'ת\\"ד'),
-                # Handle any Hebrew letter + " + Hebrew letter pattern
-                (r'([א-ת])"([א-ת])', r'\1\\"\2')
-            ]
-            
-            for pattern, replacement in hebrew_fixes:
-                if len(pattern) > 10:  # It's a regex
-                    text = re.sub(pattern, replacement, text)
-                else:
-                    text = text.replace(pattern, replacement)
-            
-            # Step 2: Fix missing commas - more robust patterns
+            logger.info(f"JSON still needs fixing after Hebrew sanitization: {e}")
+
+            # Hebrew abbreviations already fixed above - now fix structural JSON issues
+
+            # Fix missing commas - more robust patterns
             # Pattern 1: "field": "value"<whitespace>"nextfield"
             text = re.sub(r'(".*?")\s*\n\s*(".*?":\s*)', r'\1,\n  \2', text)
             
@@ -432,24 +492,17 @@ class OllamaService:
                     json_match = re.search(r'\{.*\}', text, re.DOTALL)
                     if json_match:
                         json_text = json_match.group(0)
-                        
-                        # Apply all fixes to extracted JSON
-                        for pattern, replacement in hebrew_fixes:
-                            if len(pattern) > 10:  # It's a regex
-                                json_text = re.sub(pattern, replacement, json_text)
-                            else:
-                                json_text = json_text.replace(pattern, replacement)
-                        
-                        # Fix structure issues
+
+                        # Hebrew abbreviations already fixed above, just fix structure issues
                         json_text = re.sub(r'(".*?")\s*\n\s*(".*?":\s*)', r'\1,\n  \2', json_text)
                         json_text = re.sub(r'(\])\s*\n\s*(".*?":\s*)', r'\1,\n  \2', json_text)
                         json_text = re.sub(r'(\})\s*\n\s*(".*?":\s*)', r'\1,\n  \2', json_text)
-                        
+
                         # Test the reconstructed JSON
                         json.loads(json_text)
                         logger.info("Successfully reconstructed valid JSON")
                         return json_text
-                        
+
                 except json.JSONDecodeError as e3:
                     logger.error(f"Final JSON reconstruction failed: {e3}")
                     logger.error(f"Problematic text (first 500 chars): {text[:500]}")
@@ -560,10 +613,13 @@ class OllamaService:
             try:
                 
                 # Prepare the request payload
+                # NOTE: We intentionally DO NOT use "format": "json" here.
+                # Hebrew abbreviations like ש"ח and חו"ל contain ASCII quotes
+                # that break JSON at the Ollama level BEFORE we can sanitize them.
+                # We handle JSON parsing ourselves after Hebrew sanitization.
                 payload = {
                     "model": model_name,
                     "prompt": prompt,
-                    "format": "json",  # Force Ollama to return valid JSON only
                     "options": {
                         "temperature": temp,
                         "num_predict": max_tok,
@@ -788,12 +844,27 @@ class OllamaService:
     ) -> Dict:
         """Generate a structured summary of a call transcription with automatic Hebrew prompt."""
 
-        # Escape Hebrew gershayim (double quotes in abbreviations) to prevent JSON breakage
-        # חו"ל contains an ASCII double-quote that breaks JSON parsing
-        transcription = transcription.replace('חו"ל', 'חו״ל')  # Replace with Hebrew gershayim ״
-        transcription = transcription.replace('ש"ח', 'ש״ח')
-        transcription = transcription.replace('ת"ז', 'ת״ז')
-        transcription = transcription.replace('ד"ר', 'ד״ר')
+        # Normalize Hebrew abbreviations - remove internal quotes to prevent JSON issues
+        # Both ASCII " and Hebrew gershayim ״ cause problems, so remove them entirely
+        import re
+        # Full list of Hebrew abbreviations with quotes
+        hebrew_abbrevs = [
+            ('חו"ל', 'חול'), ('חו״ל', 'חול'),
+            ('ש"ח', 'שח'), ('ש״ח', 'שח'),
+            ('ת"ז', 'תז'), ('ת״ז', 'תז'),
+            ('ד"ר', 'דר'), ('ד״ר', 'דר'),
+            ('חשכ"ל', 'חשכל'), ('חשכ״ל', 'חשכל'),
+            ('ח"כ', 'חכ'), ('מ"ר', 'מר'),
+            ('ח"י', 'חי'), ('א"ב', 'אב'),
+            ('מ"מ', 'מם'), ('ת"ד', 'תד'),
+            ('ע"י', 'עי'), ('ע״י', 'עי'),
+            ('כ"א', 'כא'), ('בע"מ', 'בעמ'),
+            ('וכו"', 'וכו'), ('וכו״', 'וכו'),
+        ]
+        for pattern, replacement in hebrew_abbrevs:
+            transcription = transcription.replace(pattern, replacement)
+        # Remove any remaining internal Hebrew quotes (letter"letter or letter״letter)
+        transcription = re.sub(r'([א-ת])["״]([א-ת])', r'\1\2', transcription)
 
         # Truncate very long conversations to prevent context overflow
         # With num_ctx=16384 tokens and Hebrew ~2.5 chars/token:
@@ -805,30 +876,62 @@ class OllamaService:
             # Keep middle + end (where resolution usually happens), cut beginning
             transcription = "...[תחילת השיחה קוצרה]...\n" + transcription[-MAX_TRANSCRIPTION_CHARS:]
 
-        # Build Hebrew prompt for DictaLM (all calls are Hebrew)
-        categories_list = '\n'.join([f'- {cat}' for cat in self.hebrew_classifications])
-        logger.info(f"📊 Using Hebrew prompt with {len(self.hebrew_classifications)} categories")
+        # === EMBEDDING-BASED CLASSIFICATION ===
+        # Classification will be performed AFTER LLM generates summary (for better accuracy)
+        # Using clean summary text instead of noisy raw transcription
+        embedding_classifications = []
+        embedding_confidence = 0.0
 
+        # Build simplified Hebrew prompt for DictaLM
+        # NOTE: Categories removed from prompt - embedding classifier handles classification
         call_id_line = f"מזהה שיחה: {call_id}\n" if call_id else ""
 
-        prompt = f"""אתה מומחה לניתוח שיחות - סכם את שיחת שירות הלקוחות של פלאפון. החזר JSON בעברית בלבד.
+        # SANITIZE TRANSCRIPTION: Remove Hebrew abbreviation quotes BEFORE sending to LLM
+        # This prevents DictaLM from reproducing quotes that break JSON output
+        sanitized_transcription = transcription
+        hebrew_abbrev_input_fixes = [
+            ('חו"ל', 'חול'), ('חו״ל', 'חול'),
+            ('ש"ח', 'שח'), ('ש״ח', 'שח'),
+            ('ת"ז', 'תז'), ('ת״ז', 'תז'),
+            ('ד"ר', 'דר'), ('ד״ר', 'דר'),
+            ('חשכ"ל', 'חשכל'), ('חשכ״ל', 'חשכל'),
+            ('ע"י', 'עי'), ('ע״י', 'עי'),
+            ('כ"א', 'כא'), ('בע"מ', 'בעמ'),
+            ('וכו"', 'וכו'), ('וכו״', 'וכו'),
+            ('ת"א', 'תא'), ('ת״א', 'תא'),
+            ('ב"ק', 'בק'), ('ב״ק', 'בק'),
+        ]
+        for pattern, replacement in hebrew_abbrev_input_fixes:
+            sanitized_transcription = sanitized_transcription.replace(pattern, replacement)
+        # Also remove any remaining Hebrew quote patterns
+        sanitized_transcription = re.sub(r'([א-ת])["״]([א-ת])', r'\1\2', sanitized_transcription)
+
+        prompt = f"""סכם את שיחת שירות הלקוחות של פלאפון.
+
+כללים חשובים:
+- הסיכום חייב להיות קצר וממוקד: 3-5 משפטים בלבד (מקסימום 6 שורות). אל תכתוב יותר מזה!
+- סכם רק מה שנאמר בשיחה בפועל. אל תמציא, אל תנחש, אל תוסיף פרטים שלא הוזכרו.
+- ציין מחירים, סכומים ותאריכים במדויק כפי שנאמרו בשיחה.
+- שמור על עקביות במין הלקוח (גבר/אישה) לאורך כל הסיכום.
+- אם מידע לא הוזכר בשיחה - אל תכלול אותו בסיכום.
+- שמור על שמות מוצרים ומספרי דגמים בדיוק כפי שהם מופיעים אל תוסיף פרטים שלא הוזכרו
+- חשוב מאוד: אל תמציא התחייבויות או הבטחות שלא נאמרו במילים מפורשות בשיחה!
+
+מה לכלול:
+- הנושא העיקרי של הפנייה
+- הפתרון שניתן או הפעולה שבוצעה
+- שמות שהוזכרו (לקוח/נציג)
+- מספרים: טלפון, תיק, סכומים, תאריכים - רק אם הוזכרו
+- בעיות שלא נפתרו (אם יש)
+- פעולות המשך נדרשות (action_items) - חשוב מאוד!
+
+action_items - כללים קריטיים:
+- רק התחייבויות שנאמרו במילים מפורשות בשיחה
+- כלול רק אם הנציג אמר במילים ברורות שיחזור או יבדוק - אחרת השאר ריק
+- אם הבעיה נפתרה במקום ולא הובטח שום דבר - החזר רשימה ריקה []
+- אסור להמציא, להניח, או לנחש התחייבויות
+
 A=נציג, C=לקוח. התעלם מ-B (בוט).
-
-מדריך סיווג (בחר הקטגוריה המתאימה ביותר):
-- תקלת קליטה = אין קליטה, רשת חלשה, אנטנות, אזור ללא כיסוי
-- תקלת גלישה בארץ = אינטרנט לא עובד, גלישה איטית, חבילת גלישה נגמרה
-- תקלת שיחות יוצאות /נכנסות בארץ = לא מצליח להתקשר או לקבל שיחות
-- סימני נטישה או איום לעזוב = רק אם הלקוח אומר במפורש: "אני עוזב", "רוצה לנתק", "עובר לחברה אחרת"
-- בירור חוב = שאלות על חובות קיימים, תשלומים שלא בוצעו
-- הסבר חשבונית או חיוב = שאלות על חיובים, הבנת החשבונית
-- מעבר תכנית/ מסלול = לקוח רוצה לשנות חבילה או מסלול
-- מידע על חבילת חו״ל = שאלות על חבילות לחו״ל, נסיעות
-- שעון ESIM -תפעול = בעיות עם שעון חכם, eSIM לשעון
-- רכישת מכשיר = לקוח רוצה לקנות טלפון חדש
-- שיחת שיווק או הצעה = רק אם נציג פלאפון התקשר בכדי להציע חבילה
-
-פורמט JSON (השתמש בשמות האמיתיים מהשיחה בלבד):
-{{"summary": "תיאור קצר של השיחה", "categories": ["קטגוריה"], "sentiment": "חיובי/שלילי/נייטרלי", "products": [], "customer_satisfaction": 1-5, "unresolved_issues": "בעיות שלא נפתרו או ריק"}}
 
 הערכת שביעות רצון (customer_satisfaction):
 1 = מאוד לא מרוצה (כעס, תלונות חריפות)
@@ -837,11 +940,13 @@ A=נציג, C=לקוח. התעלם מ-B (בוט).
 4 = מרוצה (תודות, שביעות רצון)
 5 = מאוד מרוצה (שבחים, המלצות)
 
-{call_id_line}קטגוריות זמינות:
-{categories_list}
+{call_id_line}השיחה:
+{sanitized_transcription}
 
-השיחה לסיכום:
-{transcription}"""
+חובה: החזר אך ורק JSON תקין, ללא טקסט נוסף. התחל עם {{ וסיים עם }}.
+products: רק מוצרים שהוזכרו במפורש. אם לא הוזכרו - החזר רשימה ריקה [].
+
+{{"summary": "< סיכום מתומצת בעברית>", "sentiment": "<חיובי/שלילי/נייטרלי>", "products": [], "customer_satisfaction": <1-5>, "unresolved_issues": "", "action_items": []}}"""
 
         try:
             # Format prompt for DictaLM2.0-instruct with [INST] tags
@@ -854,8 +959,8 @@ A=נציג, C=לקוח. התעלם מ-B (בוט).
             response = await self.generate_response(
                 prompt=formatted_prompt,
                 system_prompt=None,  # Already included in formatted_prompt
-                temperature=0.5,  # Optimized for Hebrew creativity and detail extraction
-                max_tokens=4000  # Increased from 3000 for Hebrew JSON
+                temperature=0.1,  # Very low for factual accuracy - prevents hallucinations
+                max_tokens=2500  # Reduced to prevent hallucination elaboration
             )
             
             # Try to parse JSON response
@@ -864,8 +969,29 @@ A=נציג, C=לקוח. התעלם מ-B (בוט).
                 logger.info(f"Raw Ollama response length: {len(response.content)}")
                 logger.info(f"Raw Ollama response: {response.content[:2000]}")  # Increased to see more
 
-                # Check for truncation before parsing
+                # IMMEDIATE SANITIZATION: Fix Hebrew abbreviations BEFORE any processing
+                # This prevents quotes in חו"ל, ש"ח etc. from breaking JSON
                 content = response.content.strip()
+                hebrew_abbrev_output_fixes = [
+                    ('חו"ל', 'חול'), ('חו״ל', 'חול'),
+                    ('ש"ח', 'שח'), ('ש״ח', 'שח'),
+                    ('ת"ז', 'תז'), ('ת״ז', 'תז'),
+                    ('ד"ר', 'דר'), ('ד״ר', 'דר'),
+                    ('חשכ"ל', 'חשכל'), ('חשכ״ל', 'חשכל'),
+                    ('ע"י', 'עי'), ('ע״י', 'עי'),
+                    ('כ"א', 'כא'), ('בע"מ', 'בעמ'),
+                    ('וכו"', 'וכו'), ('וכו״', 'וכו'),
+                    ('ת"א', 'תא'), ('ת״א', 'תא'),
+                    ('ב"ק', 'בק'), ('ב״ק', 'בק'),
+                ]
+                for pattern, replacement in hebrew_abbrev_output_fixes:
+                    content = content.replace(pattern, replacement)
+                # Remove any remaining Hebrew internal quotes
+                content = re.sub(r'([א-ת])["״]([א-ת])', r'\1\2', content)
+
+                logger.info(f"After Hebrew sanitization: {content[:500]}")
+
+                # Check for truncation AFTER sanitization
                 open_braces = content.count('{')
                 close_braces = content.count('}')
 
@@ -925,9 +1051,7 @@ A=נציג, C=לקוח. התעלם מ-B (בוט).
                 logger.info(f"JSON parsed successfully! Keys: {list(summary_data.keys())}")
 
                 # === NORMALIZE JSON KEYS - DictaLM returns inconsistent casing ===
-                # Supports both English and Hebrew key names
                 key_mapping = {
-                    # English variations (case normalization)
                     'Summary': 'summary',
                     'Categories': 'categories',
                     'Category': 'categories',
@@ -936,6 +1060,8 @@ A=נציג, C=לקוח. התעלם מ-B (בוט).
                     'Products': 'products',
                     'Customer_satisfaction': 'customer_satisfaction',
                     'Unresolved_issues': 'unresolved_issues',
+                    'Action_items': 'action_items',
+                    'ActionItems': 'action_items',
                     # Hebrew keys (DictaLM uses these)
                     'סיכום': 'summary',
                     'סיכום השיחה': 'summary',
@@ -948,6 +1074,9 @@ A=נציג, C=לקוח. התעלם מ-B (בוט).
                     'שביעות_רצון': 'customer_satisfaction',
                     'בעיות פתוחות': 'unresolved_issues',
                     'בעיות שלא נפתרו': 'unresolved_issues',
+                    'פעולות המשך': 'action_items',
+                    'פעולות_המשך': 'action_items',
+                    'משימות': 'action_items',
                     'שם': '_name',  # Ignore name field if returned
                 }
                 normalized_data = {}
@@ -970,8 +1099,87 @@ A=נציג, C=לקוח. התעלם מ-B (בוט).
 
                 summary_text = summary_data.get('summary', '')
                 if summary_text and not is_hebrew_text(summary_text):
-                    logger.warning(f"⚠️ REJECTING English summary: {summary_text[:100]}...")
-                    raise Exception("english_summary_rejected")  # Will trigger retry
+                    logger.warning(f"⚠️ English summary detected: {summary_text[:100]}...")
+
+                    # TRANSLATION APPROACH: Translate existing English summary to Hebrew
+                    # This is more reliable than regenerating the entire summary
+                    logger.info("🔄 Translating English summary to Hebrew...")
+
+                    translation_prompt = f"""תרגם את הטקסט הבא לעברית. החזר רק את התרגום, בלי הסברים:
+
+{summary_text}"""
+
+                    translation_formatted = f"[INST] {translation_prompt} [/INST]"
+                    translation_response = await self.generate_response(
+                        prompt=translation_formatted,
+                        system_prompt=None,
+                        temperature=0.2,  # Low temperature for accurate translation
+                        max_tokens=2000
+                    )
+
+                    try:
+                        # Get translated text (plain text, not JSON)
+                        translated_text = translation_response.content.strip()
+                        logger.info(f"🔄 Translation raw response: {translated_text[:300]}")
+
+                        # FIRST: Sanitize Hebrew abbreviations in raw response
+                        # This must happen BEFORE JSON parsing to prevent quotes breaking JSON
+                        hebrew_abbrev_translation_fixes = [
+                            ('חו"ל', 'חול'), ('חו״ל', 'חול'),
+                            ('ש"ח', 'שח'), ('ש״ח', 'שח'),
+                            ('ת"ז', 'תז'), ('ת״ז', 'תז'),
+                            ('ד"ר', 'דר'), ('ד״ר', 'דר'),
+                            ('חשכ"ל', 'חשכל'), ('חשכ״ל', 'חשכל'),
+                            ('ע"י', 'עי'), ('ע״י', 'עי'),
+                            ('כ"א', 'כא'), ('בע"מ', 'בעמ'),
+                            ('וכו"', 'וכו'), ('וכו״', 'וכו'),
+                            ('ת"א', 'תא'), ('ת״א', 'תא'),
+                            ('ב"ק', 'בק'), ('ב״ק', 'בק'),
+                        ]
+                        for pattern, replacement in hebrew_abbrev_translation_fixes:
+                            translated_text = translated_text.replace(pattern, replacement)
+                        # Remove any remaining Hebrew internal quotes
+                        translated_text = re.sub(r'([א-ת])["״]([א-ת])', r'\1\2', translated_text)
+
+                        logger.info(f"🔄 Translation after Hebrew sanitization: {translated_text[:300]}")
+
+                        # Clean up any JSON wrapper if model added it
+                        if translated_text.startswith('{'):
+                            try:
+                                trans_json = json.loads(translated_text)
+                                # Try standard value extraction
+                                extracted = trans_json.get('summary', trans_json.get('translation', None))
+                                if extracted:
+                                    translated_text = extracted
+                                else:
+                                    # DictaLM sometimes puts Hebrew as JSON KEY - extract first Hebrew key
+                                    for key in trans_json.keys():
+                                        if any('\u0590' <= c <= '\u05FF' for c in key):
+                                            translated_text = key.rstrip('}').strip()
+                                            logger.info(f"🔄 Extracted Hebrew from JSON key: {translated_text[:100]}")
+                                            break
+                            except:
+                                # JSON malformed - try to extract Hebrew text with regex
+                                hebrew_match = re.search(r'"([א-ת][^"]*[א-ת])"', translated_text)
+                                if hebrew_match:
+                                    translated_text = hebrew_match.group(1)
+                                    logger.info(f"🔄 Extracted Hebrew from malformed JSON via regex: {translated_text[:100]}")
+
+                        # Remove quotes if wrapped
+                        translated_text = translated_text.strip('"\'')
+
+                        # Final sanitization pass
+                        translated_text = self._sanitize_hebrew_for_json(translated_text)
+
+                        if translated_text and is_hebrew_text(translated_text):
+                            logger.info(f"✅ Translation succeeded: {translated_text[:80]}...")
+                            summary_data['summary'] = translated_text
+                        else:
+                            logger.warning(f"❌ Translation not Hebrew: {translated_text[:50] if translated_text else 'empty'}...")
+                            raise Exception("english_summary_translation_failed")
+                    except Exception as te:
+                        logger.warning(f"❌ Translation failed: {te}")
+                        raise Exception(f"english_summary_translation_error: {te}")
                 # === END HEBREW VALIDATION ===
 
                 # SIMPLIFIED FORMAT: Only 'summary' is required (categories may be absent)
@@ -1002,69 +1210,94 @@ A=נציג, C=לקוח. התעלם מ-B (בוט).
                     }
 
                 # POST-PROCESSING: Convert simplified response to full format
-                # Handle 'categories' - can be string OR list from DictaLM
-                from difflib import get_close_matches, SequenceMatcher
+                # === EMBEDDING CLASSIFICATION ON CLEAN SUMMARY TEXT ===
+                # Classification now runs AFTER LLM for better accuracy
+                # Using clean summary text instead of noisy raw transcription
 
-                categories_raw = summary_data.get('categories', '')
+                summary_text = summary_data.get('summary', '')
 
-                # Handle both list and string formats from DictaLM
-                if isinstance(categories_raw, list):
-                    raw_cats = [str(c).strip() for c in categories_raw if c]
-                elif isinstance(categories_raw, str):
-                    raw_cats = [c.strip() for c in categories_raw.split(',') if c.strip()]
+                if self._embedding_classifier and self._embedding_classifier.initialized and summary_text:
+                    try:
+                        start_classify = time.time()
+                        classification_results = await self._embedding_classifier.classify_with_fallback(
+                            text=summary_text,  # USE SUMMARY instead of transcription
+                            fallback_category="בירור כללי",
+                            top_k=2,
+                            threshold=0.35
+                        )
+                        classify_time = (time.time() - start_classify) * 1000
+
+                        if classification_results:
+                            embedding_classifications = [r.category_name for r in classification_results]
+                            embedding_confidence = classification_results[0].confidence if classification_results else 0.0
+                            keyword_boost = classification_results[0].keyword_boost if classification_results else 0.0
+
+                            logger.info(f"🚀 Classification on SUMMARY ({classify_time:.1f}ms): {embedding_classifications}")
+                            logger.info(f"   Confidence: {embedding_confidence:.3f}, Keyword boost: {keyword_boost:.3f}")
+
+                            # === CloudWatch Metrics: Embedding Classification ===
+                            cloudwatch_metrics.put_metric('EmbeddingClassificationTime', classify_time, 'Milliseconds')
+                            cloudwatch_metrics.put_metric('EmbeddingClassificationConfidence', embedding_confidence * 100, 'Percent')
+                    except Exception as e:
+                        logger.warning(f"⚠️ Embedding classification on summary failed: {e}")
+
+                if embedding_classifications:
+                    # Use embedding-based classifications (primary method)
+                    matched = embedding_classifications
+                    logger.info(f"✅ Using EMBEDDING classifications: {matched}")
                 else:
-                    raw_cats = []
-                    logger.warning(f"Unexpected categories type: {type(categories_raw)}")
-
-                # === KEYWORD-BASED CLASSIFICATION (pre-LLM backup) ===
-                # Run keyword classification on original transcription
-                keyword_category = self._classify_by_keywords(transcription)
-                if keyword_category:
-                    logger.info(f"🔑 Keyword-based category detected: '{keyword_category}'")
-
-                # Fuzzy match each category - use balanced threshold to avoid bad matches
-                matched = []
-                for cat in raw_cats:
-                    # Try exact match first
-                    if cat in self.hebrew_classifications:
-                        matched.append(cat)
-                        logger.info(f"✅ Exact match: '{cat}'")
-                        continue
-
-                    # Fuzzy match with balanced threshold (0.65) - reject dissimilar categories
-                    matches = get_close_matches(cat, self.hebrew_classifications, n=1, cutoff=0.65)
-                    if matches:
-                        matched.append(matches[0])
-                        logger.info(f"🔍 Fuzzy matched (65%+): '{cat}' → '{matches[0]}'")
-                    else:
-                        # Don't force bad matches - log and skip
-                        logger.warning(f"⚠️ No good match for category '{cat}' (cutoff 0.65) - skipping")
-
-                # === KEYWORD CLASSIFICATION - ALWAYS USE BEST MATCH AS PRIMARY ===
-                # Keywords are more reliable than LLM for specific telecom categories
-                if keyword_category:
-                    if not matched:
-                        # No LLM match - use keyword
+                    # Fallback: try keyword classification on raw transcription
+                    keyword_category = self._classify_by_keywords(transcription)
+                    if keyword_category:
                         matched = [keyword_category]
-                        logger.info(f"🔑 Using keyword classification (LLM had no match): '{keyword_category}'")
-                    elif keyword_category not in matched:
-                        # Keyword found different category - PRIORITIZE KEYWORD as primary
-                        logger.info(f"🔄 Keyword override: '{keyword_category}' beats LLM '{matched[0]}'")
-                        # Put keyword match first (primary), keep LLM match as secondary
-                        matched = [keyword_category] + [m for m in matched if m != keyword_category][:1]
-                    # else: keyword matches LLM - keep as is
-                elif not matched:
-                    # No keyword, no LLM match - use neutral default
-                    matched = ['בירור כללי']
-                    logger.warning(f"No categories found, using neutral default: {matched[0]}")
+                        logger.info(f"🔑 Using keyword fallback: '{keyword_category}'")
+                    else:
+                        # Ultimate fallback
+                        matched = ['בירור כללי']
+                        logger.warning(f"No classifications found, using neutral default: {matched[0]}")
 
                 # Build full structure for backward compatibility
                 summary_data['classifications'] = matched
                 summary_data['main_category'] = matched[0]
                 summary_data['secondary_category'] = matched[1] if len(matched) > 1 else ''
-                summary_data['is_churn_signal'] = 'נטישה' in matched[0]
                 summary_data['call_type'] = 'inbound_service'
                 summary_data['entities'] = {}
+
+                # === INDEPENDENT CHURN DETECTION ===
+                # Run churn detection on BOTH transcription AND summary, take MAX score
+                # Summary is cleaner and may have clearer churn signals like "לא מרוצה"
+                if self._embedding_classifier and self._embedding_classifier.churn_initialized:
+                    # Churn on raw transcription
+                    churn_trans = await self._embedding_classifier.detect_churn(text=transcription)
+
+                    # Churn on clean summary text (may have clearer signals)
+                    churn_summary = await self._embedding_classifier.detect_churn(text=summary_text)
+
+                    # Take the HIGHER score (more sensitive to churn signals)
+                    if churn_summary['churn_score'] > churn_trans['churn_score']:
+                        churn_result = churn_summary
+                        churn_source = 'summary'
+                        logger.info(f"📊 Churn from SUMMARY: {churn_summary['churn_score']} > transcription: {churn_trans['churn_score']}")
+                    else:
+                        churn_result = churn_trans
+                        churn_source = 'transcription'
+                        logger.info(f"📊 Churn from TRANSCRIPTION: {churn_trans['churn_score']} >= summary: {churn_summary['churn_score']}")
+
+                    summary_data['is_churn'] = churn_result['is_churn']
+                    summary_data['churn_confidence'] = churn_result['churn_confidence']
+                    summary_data['churn_score'] = churn_result['churn_score']
+                    summary_data['churn_source'] = churn_source
+
+                    if churn_result['is_churn']:
+                        logger.info(f"🚨 CHURN DETECTED: score={churn_result['churn_score']}, "
+                                   f"source={churn_source}, keyword={churn_result.get('keyword_match', 'none')}")
+                else:
+                    # Fallback: churn detection not available
+                    summary_data['is_churn'] = False
+                    summary_data['churn_confidence'] = 0.0
+                    summary_data['churn_score'] = 0
+                    summary_data['churn_source'] = 'none'
+                # === END CHURN DETECTION ===
 
                 # === EXTRACT PRODUCTS from LLM response ===
                 products = summary_data.get('products', [])
@@ -1097,7 +1330,21 @@ A=נציג, C=לקוח. התעלם מ-B (בוט).
                     summary_data['sentiment'] = 3  # Default only if completely missing
                 # === END SENTIMENT PARSING ===
 
-                summary_data['action_items'] = []
+                # === PARSE ACTION ITEMS from LLM response ===
+                raw_action_items = summary_data.get('action_items', [])
+                if not raw_action_items:
+                    raw_action_items = summary_data.get('פעולות_המשך', [])
+                if not raw_action_items:
+                    raw_action_items = summary_data.get('פעולות המשך', [])
+                # Ensure it's a list
+                if isinstance(raw_action_items, str):
+                    raw_action_items = [raw_action_items] if raw_action_items.strip() else []
+                elif not isinstance(raw_action_items, list):
+                    raw_action_items = []
+                summary_data['action_items'] = raw_action_items
+                if summary_data['action_items']:
+                    logger.info(f"📋 Action items: {summary_data['action_items']}")
+                # === END ACTION ITEMS ===
 
                 # === PARSE CUSTOMER SATISFACTION from LLM response (1-5 scale) ===
                 raw_satisfaction = summary_data.get('customer_satisfaction', 3)
@@ -1324,7 +1571,9 @@ A=נציג, C=לקוח. התעלם מ-B (בוט).
                 with open(classifications_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
                     old_count = len(self.hebrew_classifications)
-                    self.hebrew_classifications = config.get('classifications', [])
+                    raw_classifications = config.get('classifications', [])
+                    # Handle both old format (strings) and new format (objects with name)
+                    self.hebrew_classifications = self._extract_classification_names(raw_classifications)
                     new_count = len(self.hebrew_classifications)
                     logger.info(f"Reloaded classifications: {old_count} -> {new_count} classifications")
                     return True

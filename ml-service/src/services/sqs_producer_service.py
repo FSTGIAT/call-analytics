@@ -82,7 +82,15 @@ class SQSProducerService:
                 'processingTime': ml_result.get('processingTime', 0),
                 'timestamp': datetime.utcnow().isoformat(),
                 'source': 'ml-service',
-                'version': '1.0'
+                'version': '1.0',
+                # New fields for CONVERSATION_SUMMARY table
+                'products': ml_result.get('products', '[]'),  # JSON string for Oracle CLOB
+                'customer_satisfaction': ml_result.get('customer_satisfaction', 3),  # 1-5 rating
+                'unresolved_issues': ml_result.get('unresolved_issues', ''),  # Text description
+                'action_items': ml_result.get('action_items', '[]'),  # JSON string for Oracle CLOB
+                # Churn detection (independent of classification)
+                'is_churn': ml_result.get('is_churn', False),
+                'churn_confidence': ml_result.get('churn_confidence', 0.0),
             }
 
             # Send to SQS
@@ -113,6 +121,10 @@ class SQSProducerService:
             # === CloudWatch Metrics: SQS Message Sent ===
             cloudwatch_metrics.put_metric('SQSMessagesSent', 1)
             logger.info(f"✅ ML result sent to SQS for call {call_id}, MessageId: {response['MessageId']}")
+            logger.info(f"📦 SQS message includes: products={message_body.get('products')}, "
+                       f"action_items={message_body.get('action_items')}, "
+                       f"customer_satisfaction={message_body.get('customer_satisfaction')}, "
+                       f"unresolved_issues={message_body.get('unresolved_issues')}")
             return True
 
         except Exception as e:
