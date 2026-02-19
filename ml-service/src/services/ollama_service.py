@@ -1290,7 +1290,7 @@ products: רק מוצרים שהוזכרו במפורש. אם לא הוזכרו 
 
                     if churn_result['is_churn']:
                         logger.info(f"🚨 CHURN DETECTED: score={churn_result['churn_score']}, "
-                                   f"source={churn_source}, keyword={churn_result.get('keyword_match', 'none')}")
+                                   f"source={churn_source}, best_prototype={churn_result.get('best_prototype_index', -1)}")
                 else:
                     # Fallback: churn detection not available
                     summary_data['is_churn'] = False

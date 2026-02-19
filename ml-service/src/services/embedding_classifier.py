@@ -51,21 +51,11 @@ class EmbeddingClassifier:
         self.keyword_strong_boost = float(os.getenv('KEYWORD_STRONG_BOOST', '0.15'))
         self.keyword_weak_boost = float(os.getenv('KEYWORD_WEAK_BOOST', '0.05'))
 
-        # Churn detection configuration
-        self.churn_embedding: Optional[np.ndarray] = None
+        # Churn detection configuration (pure embedding-based, no keywords)
+        self.churn_embeddings: List[np.ndarray] = []
         self.churn_config: Dict = {}
         self.churn_initialized = False
-        self.churn_threshold = float(os.getenv('CHURN_DETECTION_THRESHOLD', '0.40'))
-
-        # Churn keyword boosting (loaded from keywords config)
-        self.churn_keywords: Dict[str, list] = {'strong': [], 'medium': [], 'weak': [], 'negative': []}
-        self.churn_scoring: Dict = {
-            'strong_boost': 35,
-            'medium_boost': 20,
-            'weak_boost': 10,
-            'min_baseline': 0.50,
-            'max_signal': 0.72
-        }
+        self.churn_threshold = float(os.getenv('CHURN_DETECTION_THRESHOLD', '40'))
 
         # Stats
         self.stats = {
@@ -134,31 +124,13 @@ class EmbeddingClassifier:
                 self.keywords = keywords_data.get('keywords', {})
                 logger.info(f"Loaded keywords for {len(self.keywords)} categories")
 
-                # Load churn-specific keywords and scoring config
-                churn_kw = keywords_data.get('churn_keywords', {})
-                if churn_kw:
-                    self.churn_keywords = {
-                        'strong': churn_kw.get('strong', []),
-                        'medium': churn_kw.get('medium', []),
-                        'weak': churn_kw.get('weak', []),
-                        'negative': churn_kw.get('negative', [])
-                    }
-                    logger.info(f"Loaded churn keywords: {len(self.churn_keywords['strong'])} strong, "
-                                f"{len(self.churn_keywords['medium'])} medium, {len(self.churn_keywords['weak'])} weak, "
-                                f"{len(self.churn_keywords['negative'])} negative")
-
-                churn_scoring = keywords_data.get('churn_scoring', {})
-                if churn_scoring:
-                    self.churn_scoring.update(churn_scoring)
-                    logger.info(f"Loaded churn scoring config: {self.churn_scoring}")
-
             # Compute category embeddings
             await self._compute_category_embeddings()
 
-            # Load and compute churn detection embedding
+            # Load and compute churn detection embeddings (multi-prototype)
             churn_config = data.get('churn_detection', {})
             if churn_config.get('enabled', False):
-                await self._compute_churn_embedding(churn_config)
+                await self._compute_churn_embeddings(churn_config)
 
             self.initialized = True
             logger.info(f"EmbeddingClassifier initialized with {len(self.category_embeddings)} category embeddings")
@@ -187,101 +159,84 @@ class EmbeddingClassifier:
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info(f"Computed {len(self.category_embeddings)} category embeddings in {elapsed:.2f}s")
 
-    async def _compute_churn_embedding(self, churn_config: Dict) -> bool:
+    async def _compute_churn_embeddings(self, churn_config: Dict) -> bool:
         """
-        Pre-compute embedding for independent churn detection.
+        Pre-compute embeddings for independent churn detection using multiple prototypes.
+
+        Computes an embedding for the main description AND for each churn prototype,
+        giving broader semantic coverage of churn signals.
 
         Args:
-            churn_config: Dict with 'enabled', 'description', 'threshold'
+            churn_config: Dict with 'enabled', 'description', 'threshold', 'churn_prototypes'
 
         Returns:
-            True if churn embedding computed successfully
+            True if churn embeddings computed successfully
         """
         if not churn_config or not churn_config.get('enabled', False):
             logger.info("Churn detection disabled in config")
             return False
 
         description = churn_config.get('description', '')
-        if not description:
-            logger.error("No churn description provided in config")
+        prototypes = churn_config.get('churn_prototypes', [])
+
+        if not description and not prototypes:
+            logger.error("No churn description or prototypes provided in config")
             return False
 
         try:
-            logger.info("Computing churn detection embedding...")
-            result = await self.embedding_service.generate_embedding(description)
-            self.churn_embedding = result.embedding
+            logger.info("Computing churn prototype embeddings...")
+            self.churn_embeddings = []
+
+            # Embed the main description
+            if description:
+                result = await self.embedding_service.generate_embedding(description)
+                self.churn_embeddings.append(result.embedding)
+                logger.info("  [0] description embedding computed")
+
+            # Embed each prototype
+            for i, prototype in enumerate(prototypes):
+                result = await self.embedding_service.generate_embedding(prototype)
+                self.churn_embeddings.append(result.embedding)
+                logger.info(f"  [{len(self.churn_embeddings) - 1}] prototype embedding computed: {prototype[:60]}...")
+
             self.churn_config = churn_config
-            self.churn_threshold = float(churn_config.get('threshold', 0.40))
+            self.churn_threshold = float(churn_config.get('threshold', 40))
             self.churn_initialized = True
 
-            logger.info(f"Churn embedding computed (threshold: {self.churn_threshold})")
+            logger.info(f"Computed {len(self.churn_embeddings)} churn prototype embeddings (threshold: {self.churn_threshold})")
             return True
 
         except Exception as e:
-            logger.error(f"Failed to compute churn embedding: {e}")
+            logger.error(f"Failed to compute churn embeddings: {e}")
             return False
-
-    def _calculate_churn_keyword_boost(self, text: str) -> tuple[float, str]:
-        """
-        Calculate keyword boost for churn detection.
-
-        Returns:
-            Tuple of (boost_value, matched_level) where matched_level is 'strong', 'medium', 'weak', 'negative', or 'none'
-        """
-        text_lower = text.lower()
-
-        # Check NEGATIVE keywords FIRST (highest priority!)
-        # These indicate someone is JOINING Pelephone, not leaving
-        # Examples: "לעבור לפלאפון", "להצטרף לפלאפון", "חוזר לפלאפון"
-        for keyword in self.churn_keywords.get('negative', []):
-            if keyword.lower() in text_lower:
-                logger.info(f"NEGATIVE churn keyword detected: '{keyword}' - this is NOT churn (customer joining)")
-                return (self.churn_scoring.get('negative_boost', -80), 'negative')
-
-        # Check strong keywords (churn signals)
-        for keyword in self.churn_keywords.get('strong', []):
-            if keyword.lower() in text_lower:
-                return (self.churn_scoring.get('strong_boost', 35), 'strong')
-
-        # Check medium keywords
-        for keyword in self.churn_keywords.get('medium', []):
-            if keyword.lower() in text_lower:
-                return (self.churn_scoring.get('medium_boost', 20), 'medium')
-
-        # Check weak keywords
-        for keyword in self.churn_keywords.get('weak', []):
-            if keyword.lower() in text_lower:
-                return (self.churn_scoring.get('weak_boost', 10), 'weak')
-
-        return (0.0, 'none')
 
     async def detect_churn(self, text: str) -> Dict:
         """
-        Detect churn signal using embedding similarity + keyword boosting.
+        Detect churn signal using pure multi-prototype embedding similarity.
 
-        The raw cosine similarity is rescaled from the observed range (0.50-0.72)
-        to a 0-100 scale, then keyword boosts are added for explicit churn signals.
+        Computes cosine similarity against each churn prototype embedding,
+        takes the max, and rescales to a 0-100 score.
 
         Args:
             text: The conversation transcription text
 
         Returns:
             Dict with:
-                - is_churn: bool (True if final score >= 40)
+                - is_churn: bool (True if final score >= threshold)
                 - churn_confidence: float (rescaled score 0.0-1.0)
                 - churn_score: int (0-100 scale for display)
-                - raw_similarity: float (original cosine similarity)
-                - keyword_boost: float (points added from keywords)
-                - keyword_match: str ('strong', 'medium', 'weak', or 'none')
+                - raw_similarity: float (best cosine similarity)
+                - best_prototype_index: int (index of best matching prototype)
+                - prototype_scores: list (similarity per prototype for calibration)
         """
-        if not self.churn_initialized or self.churn_embedding is None:
+        if not self.churn_initialized or not self.churn_embeddings:
             return {
                 'is_churn': False,
                 'churn_confidence': 0.0,
                 'churn_score': 0,
                 'raw_similarity': 0.0,
-                'keyword_boost': 0,
-                'keyword_match': 'none'
+                'best_prototype_index': -1,
+                'prototype_scores': []
             }
 
         try:
@@ -291,26 +246,25 @@ class EmbeddingClassifier:
             text_result = await self.embedding_service.generate_embedding(text)
             text_embedding = text_result.embedding
 
-            # Compute cosine similarity with churn embedding
-            raw_similarity = float(np.dot(text_embedding, self.churn_embedding))
+            # Compute cosine similarity against EACH churn prototype
+            prototype_similarities = []
+            for i, churn_emb in enumerate(self.churn_embeddings):
+                sim = float(np.dot(text_embedding, churn_emb))
+                prototype_similarities.append(round(sim, 4))
 
-            # Step 1: Rescale from observed range to 0-100
-            min_baseline = self.churn_scoring.get('min_baseline', 0.50)
-            max_signal = self.churn_scoring.get('max_signal', 0.72)
+            # Best match
+            best_sim = max(prototype_similarities)
+            best_idx = prototype_similarities.index(best_sim)
 
-            # Normalize: (similarity - min) / (max - min) -> 0-1
-            normalized = (raw_similarity - min_baseline) / (max_signal - min_baseline)
-            base_score = max(0, min(100, normalized * 100))
+            # Rescale from observed range to 0-100
+            # These boundaries should be calibrated based on observed data
+            min_baseline = 0.50
+            max_signal = 0.82
+            normalized = (best_sim - min_baseline) / (max_signal - min_baseline)
+            final_score = max(0, min(100, normalized * 100))
 
-            # Step 2: Calculate keyword boost
-            keyword_boost, keyword_match = self._calculate_churn_keyword_boost(text)
-
-            # Step 3: Combine scores (clamp to 0-100)
-            # Negative boost can bring score down (e.g., customer joining Pelephone, not leaving)
-            final_score = max(0, min(100, base_score + keyword_boost))
-
-            # Determine churn: score >= 40 is considered churn risk
-            is_churn = final_score >= 40
+            # Determine churn: score >= threshold
+            is_churn = final_score >= self.churn_threshold
 
             # Update stats
             self.stats['churn_detections'] += 1
@@ -319,34 +273,30 @@ class EmbeddingClassifier:
 
             elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
 
-            # Log with detailed breakdown
-            if keyword_match == 'negative':
-                # Special logging for false positive prevention
+            # Calibration logging — shows which prototype matched and by how much
+            proto_labels = ['description'] + [f'proto_{i}' for i in range(len(self.churn_embeddings) - 1)]
+            proto_log = ', '.join(f'{proto_labels[i]}={s:.4f}' for i, s in enumerate(prototype_similarities))
+
+            if is_churn:
                 logger.info(
-                    f"NOT CHURN (customer joining): score={final_score:.0f} "
-                    f"(base={base_score:.0f} + negative_boost={keyword_boost:.0f}) "
-                    f"raw_sim={raw_similarity:.3f}, time={elapsed_ms:.1f}ms"
+                    f"CHURN DETECTED: score={final_score:.0f}, best=[{best_idx}] sim={best_sim:.4f}, "
+                    f"threshold={self.churn_threshold}, time={elapsed_ms:.1f}ms"
                 )
-            elif is_churn:
-                logger.info(
-                    f"CHURN DETECTED: score={final_score:.0f} "
-                    f"(base={base_score:.0f} + keyword={keyword_boost:.0f} [{keyword_match}]) "
-                    f"raw_sim={raw_similarity:.3f}, time={elapsed_ms:.1f}ms"
-                )
+                logger.info(f"  Prototype scores: {proto_log}")
             else:
                 logger.debug(
-                    f"No churn: score={final_score:.0f} "
-                    f"(base={base_score:.0f} + keyword={keyword_boost:.0f}) "
-                    f"raw_sim={raw_similarity:.3f}"
+                    f"No churn: score={final_score:.0f}, best=[{best_idx}] sim={best_sim:.4f}, "
+                    f"threshold={self.churn_threshold}"
                 )
+                logger.debug(f"  Prototype scores: {proto_log}")
 
             return {
                 'is_churn': is_churn,
-                'churn_confidence': round(final_score / 100.0, 3),  # 0.0-1.0 for backwards compatibility
-                'churn_score': int(final_score),  # 0-100 for display
-                'raw_similarity': round(raw_similarity, 3),
-                'keyword_boost': int(keyword_boost),
-                'keyword_match': keyword_match
+                'churn_confidence': round(final_score / 100.0, 3),
+                'churn_score': int(final_score),
+                'raw_similarity': round(best_sim, 4),
+                'best_prototype_index': best_idx,
+                'prototype_scores': prototype_similarities
             }
 
         except Exception as e:
@@ -356,8 +306,8 @@ class EmbeddingClassifier:
                 'churn_confidence': 0.0,
                 'churn_score': 0,
                 'raw_similarity': 0.0,
-                'keyword_boost': 0,
-                'keyword_match': 'none'
+                'best_prototype_index': -1,
+                'prototype_scores': []
             }
 
     def _calculate_keyword_boost(self, text: str, category_name: str) -> float:
@@ -545,13 +495,7 @@ class EmbeddingClassifier:
             'churn_threshold': self.churn_threshold,
             'churn_detections': self.stats['churn_detections'],
             'churn_positives': self.stats['churn_positives'],
-            # Churn scoring config (for debugging)
-            'churn_scoring': self.churn_scoring,
-            'churn_keywords_loaded': {
-                'strong': len(self.churn_keywords.get('strong', [])),
-                'medium': len(self.churn_keywords.get('medium', [])),
-                'weak': len(self.churn_keywords.get('weak', []))
-            }
+            'churn_prototypes_count': len(self.churn_embeddings)
         }
 
     async def reload_configs_safe(
@@ -587,8 +531,6 @@ class EmbeddingClassifier:
             new_categories = None
             new_category_embeddings = None
             new_keywords = None
-            new_churn_keywords = None
-            new_churn_scoring = None
 
             if classifications_data:
                 classifications = classifications_data.get('classifications', [])
@@ -618,32 +560,21 @@ class EmbeddingClassifier:
                     result = await self.embedding_service.generate_embedding(text)
                     new_category_embeddings[cat_id] = result.embedding
 
-                # Check for churn config update
+                # Check for churn config update (multi-prototype)
                 churn_config = classifications_data.get('churn_detection', {})
                 if churn_config.get('enabled', False):
+                    new_churn_embeddings = []
                     description = churn_config.get('description', '')
                     if description:
                         result = await self.embedding_service.generate_embedding(description)
-                        new_churn_embedding = result.embedding
-                        new_churn_threshold = float(churn_config.get('threshold', 0.40))
+                        new_churn_embeddings.append(result.embedding)
+                    for prototype in churn_config.get('churn_prototypes', []):
+                        result = await self.embedding_service.generate_embedding(prototype)
+                        new_churn_embeddings.append(result.embedding)
+                    new_churn_threshold = float(churn_config.get('threshold', 40))
 
             if keywords_data:
                 new_keywords = keywords_data.get('keywords', {})
-
-                # Load churn keywords
-                churn_kw = keywords_data.get('churn_keywords', {})
-                if churn_kw:
-                    new_churn_keywords = {
-                        'strong': churn_kw.get('strong', []),
-                        'medium': churn_kw.get('medium', []),
-                        'weak': churn_kw.get('weak', []),
-                        'negative': churn_kw.get('negative', [])
-                    }
-
-                # Load churn scoring config
-                churn_scoring = keywords_data.get('churn_scoring', {})
-                if churn_scoring:
-                    new_churn_scoring = churn_scoring
 
             # Step 3: ATOMIC SWAP - instant pointer switch
             # Python GIL ensures thread-safety for reference assignment
@@ -659,23 +590,13 @@ class EmbeddingClassifier:
                 self.keywords = new_keywords
                 logger.info(f"   Loaded keywords for {len(new_keywords)} categories")
 
-            if new_churn_keywords is not None:
-                self.churn_keywords = new_churn_keywords
-                logger.info(f"   Loaded churn keywords: {len(new_churn_keywords.get('strong', []))} strong, "
-                           f"{len(new_churn_keywords.get('medium', []))} medium, "
-                           f"{len(new_churn_keywords.get('weak', []))} weak")
-
-            if new_churn_scoring is not None:
-                self.churn_scoring.update(new_churn_scoring)
-                logger.info(f"   Updated churn scoring config")
-
             if classifications_data and 'churn_detection' in classifications_data:
                 churn_config = classifications_data['churn_detection']
-                if churn_config.get('enabled', False) and 'new_churn_embedding' in dir():
-                    self.churn_embedding = new_churn_embedding
+                if churn_config.get('enabled', False) and 'new_churn_embeddings' in dir() and new_churn_embeddings:
+                    self.churn_embeddings = new_churn_embeddings
                     self.churn_threshold = new_churn_threshold
                     self.churn_initialized = True
-                    logger.info(f"   Updated churn embedding (threshold: {new_churn_threshold})")
+                    logger.info(f"   Updated {len(new_churn_embeddings)} churn prototype embeddings (threshold: {new_churn_threshold})")
 
             logger.info("Config reload complete - ZERO DISRUPTION")
             return True
