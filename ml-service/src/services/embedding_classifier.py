@@ -187,17 +187,15 @@ class EmbeddingClassifier:
             logger.info("Computing churn prototype embeddings...")
             self.churn_embeddings = []
 
-            # Embed the main description
-            if description:
-                result = await self.embedding_service.generate_embedding(description)
-                self.churn_embeddings.append(result.embedding)
-                logger.info("  [0] description embedding computed")
+            # Only embed focused prototypes — description is too generic and causes false positives
+            if not prototypes:
+                logger.error("No churn prototypes configured")
+                return False
 
-            # Embed each prototype
             for i, prototype in enumerate(prototypes):
                 result = await self.embedding_service.generate_embedding(prototype)
                 self.churn_embeddings.append(result.embedding)
-                logger.info(f"  [{len(self.churn_embeddings) - 1}] prototype embedding computed: {prototype[:60]}...")
+                logger.info(f"  [{i}] prototype embedding computed: {prototype[:60]}...")
 
             self.churn_config = churn_config
             self.churn_threshold = float(churn_config.get('threshold', 40))
@@ -274,8 +272,7 @@ class EmbeddingClassifier:
             elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
 
             # Calibration logging — shows which prototype matched and by how much
-            proto_labels = ['description'] + [f'proto_{i}' for i in range(len(self.churn_embeddings) - 1)]
-            proto_log = ', '.join(f'{proto_labels[i]}={s:.4f}' for i, s in enumerate(prototype_similarities))
+            proto_log = ', '.join(f'proto_{i}={s:.4f}' for i, s in enumerate(prototype_similarities))
 
             if is_churn:
                 logger.info(
@@ -560,18 +557,14 @@ class EmbeddingClassifier:
                     result = await self.embedding_service.generate_embedding(text)
                     new_category_embeddings[cat_id] = result.embedding
 
-                # Check for churn config update (multi-prototype)
+                # Check for churn config update (multi-prototype, no description)
                 churn_config = classifications_data.get('churn_detection', {})
                 if churn_config.get('enabled', False):
                     new_churn_embeddings = []
-                    description = churn_config.get('description', '')
-                    if description:
-                        result = await self.embedding_service.generate_embedding(description)
-                        new_churn_embeddings.append(result.embedding)
                     for prototype in churn_config.get('churn_prototypes', []):
                         result = await self.embedding_service.generate_embedding(prototype)
                         new_churn_embeddings.append(result.embedding)
-                    new_churn_threshold = float(churn_config.get('threshold', 40))
+                    new_churn_threshold = float(churn_config.get('threshold', 70))
 
             if keywords_data:
                 new_keywords = keywords_data.get('keywords', {})

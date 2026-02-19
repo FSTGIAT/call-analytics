@@ -128,15 +128,10 @@ class ChurnScoreTester:
             self.churn_prototypes = churn_config.get('churn_prototypes', [])
             self.churn_threshold = int(churn_config.get('threshold', 40))
 
-            # Build labels for display
-            self.prototype_labels = []
-            if self.churn_description:
-                self.prototype_labels.append('description')
-            for i in range(len(self.churn_prototypes)):
-                self.prototype_labels.append(f'proto_{i}')
+            # Build labels for display (prototypes only, no description)
+            self.prototype_labels = [f'proto_{i}' for i in range(len(self.churn_prototypes))]
 
-            total = (1 if self.churn_description else 0) + len(self.churn_prototypes)
-            print(f"  Loaded {colorize(str(total), Colors.GREEN)} churn prototypes (threshold: {self.churn_threshold})")
+            print(f"  Loaded {colorize(str(len(self.churn_prototypes)), Colors.GREEN)} churn prototypes (threshold: {self.churn_threshold})")
 
             return True
 
@@ -206,21 +201,14 @@ class ChurnScoreTester:
     def compute_churn_embeddings(self) -> bool:
         """Compute all churn prototype embeddings."""
         try:
-            print(colorize("\nComputing churn prototype embeddings...", Colors.CYAN))
+            print(colorize("\nComputing churn prototype embeddings (no description)...", Colors.CYAN))
             self.churn_embeddings = []
 
-            # Embed the main description
-            if self.churn_description:
-                emb = self._encode_and_normalize(self.churn_description)
-                self.churn_embeddings.append(emb)
-                print(f"  [0] description embedding computed")
-
-            # Embed each prototype
+            # Only embed focused prototypes — description is too generic
             for i, prototype in enumerate(self.churn_prototypes):
                 emb = self._encode_and_normalize(prototype)
                 self.churn_embeddings.append(emb)
-                idx = len(self.churn_embeddings) - 1
-                print(f"  [{idx}] prototype: {prototype[:60]}...")
+                print(f"  [{i}] prototype: {prototype[:60]}...")
 
             print(colorize(f"  Total: {len(self.churn_embeddings)} embeddings", Colors.GREEN))
             return True
