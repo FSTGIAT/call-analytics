@@ -840,7 +840,8 @@ class OllamaService:
         include_sentiment: bool = True,
         include_products: bool = True,
         use_call_id_prompt: bool = True,
-        prompt_template: str = 'summarize_with_id'
+        prompt_template: str = 'summarize_with_id',
+        source_type: str = 'CALL'
     ) -> Dict:
         """Generate a structured summary of a call transcription with automatic Hebrew prompt."""
 
@@ -906,7 +907,60 @@ class OllamaService:
         # Also remove any remaining Hebrew quote patterns
         sanitized_transcription = re.sub(r'([א-ת])["״]([א-ת])', r'\1\2', sanitized_transcription)
 
-        prompt = f"""סכם את שיחת שירות הלקוחות של פלאפון.
+        if source_type == 'WAPP':
+            prompt = f"""סכם את שיחת הוואטסאפ של שירות הלקוחות של פלאפון.
+
+כללים חשובים:
+- הסיכום חייב להיות קצר וממוקד: 3-5 משפטים בלבד (מקסימום 6 שורות). אל תכתוב יותר מזה!
+- סכם רק מה שנכתב בשיחה בפועל. אל תמציא, אל תנחש, אל תוסיף פרטים שלא הוזכרו.
+- ציין מחירים, סכומים ותאריכים במדויק כפי שנכתבו בשיחה.
+- שמור על עקביות במין הלקוח (גבר/אישה) לאורך כל הסיכום.
+- אם מידע לא הוזכר בשיחה - אל תכלול אותו בסיכום.
+- שמור על שמות מוצרים ומספרי דגמים בדיוק כפי שהם מופיעים.
+- חשוב מאוד: אל תמציא התחייבויות או הבטחות שלא נכתבו במילים מפורשות בשיחה!
+
+מה לכלול:
+- הנושא העיקרי של הפנייה
+- הפתרון שניתן או הפעולה שבוצעה
+- שמות שהוזכרו (לקוח/נציג)
+- מספרים: טלפון, תיק, סכומים, תאריכים - רק אם הוזכרו
+- בעיות שלא נפתרו (אם יש)
+- פעולות המשך נדרשות (action_items) - חשוב מאוד!
+
+action_items - כללים קריטיים:
+- רק התחייבויות שנכתבו במילים מפורשות בשיחה
+- כלול רק אם הנציג כתב במילים ברורות שיחזור או יבדוק - אחרת השאר ריק
+- אם הבעיה נפתרה במקום ולא הובטח שום דבר - החזר רשימה ריקה []
+- אסור להמציא, להניח, או לנחש התחייבויות
+
+תפקידי המשתתפים:
+A = נציג שירות
+B = בוט אוטומטי (סכם את תגובות הבוט בקצרה כחלק מתהליך השיחה)
+C = לקוח
+
+שימוש באימוג׳ים להערכת שביעות רצון:
+- אימוג׳ים הם חלק חשוב משיחת וואטסאפ! השתמש בהם כאינדיקטור לרגש הלקוח.
+- 😊🙏👍😃 = סימן לשביעות רצון (העלה את הציון)
+- 😡😤😢👎 = סימן לאי שביעות רצון (הורד את הציון)
+- אם הלקוח סיים את השיחה עם אימוג׳י חיובי - זה מעיד על שביעות רצון
+- אם אין אימוג׳ים - התבסס על התוכן הכתוב בלבד
+
+הערכת שביעות רצון (customer_satisfaction):
+1 = מאוד לא מרוצה (כעס, תלונות חריפות, אימוג׳ים שליליים)
+2 = לא מרוצה (תסכול, אי שביעות רצון)
+3 = נייטרלי (שיחה עניינית ללא רגש מיוחד)
+4 = מרוצה (תודות, שביעות רצון, אימוג׳ים חיוביים)
+5 = מאוד מרוצה (שבחים, המלצות, אימוג׳ים חיוביים רבים)
+
+{call_id_line}השיחה:
+{sanitized_transcription}
+
+חובה: החזר אך ורק JSON תקין, ללא טקסט נוסף. התחל עם {{ וסיים עם }}.
+products: רק מוצרים שהוזכרו במפורש. אם לא הוזכרו - החזר רשימה ריקה [].
+
+{{"summary": "<סיכום מתומצת בעברית>", "sentiment": "<חיובי/שלילי/נייטרלי>", "products": [], "customer_satisfaction": <1-5>, "unresolved_issues": "", "action_items": []}}"""
+        else:
+            prompt = f"""סכם את שיחת שירות הלקוחות של פלאפון.
 
 כללים חשובים:
 - הסיכום חייב להיות קצר וממוקד: 3-5 משפטים בלבד (מקסימום 6 שורות). אל תכתוב יותר מזה!
@@ -960,7 +1014,7 @@ products: רק מוצרים שהוזכרו במפורש. אם לא הוזכרו 
                 prompt=formatted_prompt,
                 system_prompt=None,  # Already included in formatted_prompt
                 temperature=0.1,  # Very low for factual accuracy - prevents hallucinations
-                max_tokens=2500  # Reduced to prevent hallucination elaboration
+                max_tokens=1200  # Increased: most calls use ~59 tokens, but long calls were hitting 800 and truncating JSON
             )
             
             # Try to parse JSON response
@@ -1222,8 +1276,8 @@ products: רק מוצרים שהוזכרו במפורש. אם לא הוזכרו 
                         classification_results = await self._embedding_classifier.classify_with_fallback(
                             text=summary_text,  # USE SUMMARY instead of transcription
                             fallback_category="בירור כללי",
-                            top_k=2,
-                            threshold=0.35
+                            top_k=int(os.getenv('CLASSIFICATION_TOP_K', '1')),
+                            threshold=float(os.getenv('CLASSIFICATION_THRESHOLD', '0.35'))
                         )
                         classify_time = (time.time() - start_classify) * 1000
 
@@ -1282,6 +1336,40 @@ products: רק מוצרים שהוזכרו במפורש. אם לא הוזכרו 
                         churn_result = churn_trans
                         churn_source = 'transcription'
                         logger.info(f"📊 Churn from TRANSCRIPTION: {churn_trans['churn_score']} >= summary: {churn_summary['churn_score']}")
+
+                    # === CLASSIFICATION-AWARE CHURN BOOST ===
+                    # Boost churn based on call classification category
+                    churn_boost_categories = {
+                        'ניוד קו': 50,           # Porting = high churn signal
+                        'תקלת קליטה': 15,        # Reception issues = moderate risk
+                        'תקלת גלישה בארץ': 10,   # Data issues = moderate risk
+                        'תקלת שיחות יוצאות /נכנסות בארץ': 10,  # Call issues = moderate risk
+                        'תקלת גלישה בחול': 10,
+                        'תקלת שיחות יוצאות /נכנסות בחול': 10,
+                    }
+                    classification_churn_boost = 0
+                    for cat_name, boost_val in churn_boost_categories.items():
+                        if cat_name in matched:
+                            classification_churn_boost = max(classification_churn_boost, boost_val)
+                            logger.info(f"📊 Classification-based churn boost: +{boost_val} (category: {cat_name})")
+
+                    # Sentiment-aware boost: if customer expressed dissatisfaction, add extra
+                    sentiment = summary_data.get('sentiment', '')
+                    satisfaction = summary_data.get('customer_satisfaction', 3)
+                    dissatisfaction_boost = 0
+                    if satisfaction <= 2 or sentiment in ['שלילי', 'negative']:
+                        dissatisfaction_boost = 15
+                        logger.info(f"📊 Dissatisfaction churn boost: +15 (satisfaction={satisfaction}, sentiment={sentiment})")
+
+                    total_boost = classification_churn_boost + dissatisfaction_boost
+                    if total_boost > 0:
+                        boosted_score = min(100, churn_result['churn_score'] + total_boost)
+                        logger.info(f"📊 Churn score boosted: {churn_result['churn_score']} → {boosted_score} "
+                                   f"(classification: +{classification_churn_boost}, dissatisfaction: +{dissatisfaction_boost})")
+                        churn_result['churn_score'] = boosted_score
+                        churn_result['churn_confidence'] = round(boosted_score / 100.0, 3)
+                        churn_result['is_churn'] = boosted_score >= 40
+                    # === END CLASSIFICATION-AWARE CHURN BOOST ===
 
                     summary_data['is_churn'] = churn_result['is_churn']
                     summary_data['churn_confidence'] = churn_result['churn_confidence']

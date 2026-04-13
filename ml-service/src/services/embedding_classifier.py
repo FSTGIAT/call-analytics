@@ -243,15 +243,19 @@ class EmbeddingClassifier:
             if keyword.lower() in text_lower:
                 return (self.churn_scoring.get('strong_boost', 35), 'strong')
 
-        # Check medium keywords
-        for keyword in self.churn_keywords.get('medium', []):
-            if keyword.lower() in text_lower:
-                return (self.churn_scoring.get('medium_boost', 20), 'medium')
+        # Check medium keywords (require min matches to prevent single-word false positives)
+        medium_min_matches = int(self.churn_scoring.get('medium_min_matches', 1))
+        medium_count = sum(1 for kw in self.churn_keywords.get('medium', []) if kw.lower() in text_lower)
+        if medium_count >= medium_min_matches:
+            return (self.churn_scoring.get('medium_boost', 15), 'medium')
+        elif medium_count > 0:
+            # Single medium match downgraded to weak boost
+            return (self.churn_scoring.get('weak_boost', 8), 'weak')
 
         # Check weak keywords
         for keyword in self.churn_keywords.get('weak', []):
             if keyword.lower() in text_lower:
-                return (self.churn_scoring.get('weak_boost', 10), 'weak')
+                return (self.churn_scoring.get('weak_boost', 8), 'weak')
 
         return (0.0, 'none')
 
@@ -281,7 +285,8 @@ class EmbeddingClassifier:
                 'churn_score': 0,
                 'raw_similarity': 0.0,
                 'keyword_boost': 0,
-                'keyword_match': 'none'
+                'keyword_match': 'none',
+                'resolution_dampening': 0
             }
 
         try:
@@ -309,6 +314,19 @@ class EmbeddingClassifier:
             # Negative boost can bring score down (e.g., customer joining Pelephone, not leaving)
             final_score = max(0, min(100, base_score + keyword_boost))
 
+            # Step 4: Resolution-aware dampening
+            # If conversation ends positively (negative keywords in second half), reduce score
+            resolution_dampening = 0
+            text_len = len(text)
+            if text_len > 200 and final_score >= 40:
+                second_half = text[text_len // 2:].lower()
+                for kw in self.churn_keywords.get('negative', []):
+                    if kw.lower() in second_half:
+                        resolution_dampening = self.churn_scoring.get('resolution_dampening', -25)
+                        final_score = max(0, final_score + resolution_dampening)
+                        logger.info(f"Resolution dampening applied: {resolution_dampening} (keyword: '{kw}')")
+                        break
+
             # Determine churn: score >= 40 is considered churn risk
             is_churn = final_score >= 40
 
@@ -330,13 +348,15 @@ class EmbeddingClassifier:
             elif is_churn:
                 logger.info(
                     f"CHURN DETECTED: score={final_score:.0f} "
-                    f"(base={base_score:.0f} + keyword={keyword_boost:.0f} [{keyword_match}]) "
+                    f"(base={base_score:.0f} + keyword={keyword_boost:.0f} [{keyword_match}]"
+                    f"{f' + resolution={resolution_dampening}' if resolution_dampening else ''}) "
                     f"raw_sim={raw_similarity:.3f}, time={elapsed_ms:.1f}ms"
                 )
             else:
                 logger.debug(
                     f"No churn: score={final_score:.0f} "
-                    f"(base={base_score:.0f} + keyword={keyword_boost:.0f}) "
+                    f"(base={base_score:.0f} + keyword={keyword_boost:.0f}"
+                    f"{f' + resolution={resolution_dampening}' if resolution_dampening else ''}) "
                     f"raw_sim={raw_similarity:.3f}"
                 )
 
@@ -346,7 +366,8 @@ class EmbeddingClassifier:
                 'churn_score': int(final_score),  # 0-100 for display
                 'raw_similarity': round(raw_similarity, 3),
                 'keyword_boost': int(keyword_boost),
-                'keyword_match': keyword_match
+                'keyword_match': keyword_match,
+                'resolution_dampening': int(resolution_dampening)
             }
 
         except Exception as e:
@@ -357,7 +378,8 @@ class EmbeddingClassifier:
                 'churn_score': 0,
                 'raw_similarity': 0.0,
                 'keyword_boost': 0,
-                'keyword_match': 'none'
+                'keyword_match': 'none',
+                'resolution_dampening': 0
             }
 
     def _calculate_keyword_boost(self, text: str, category_name: str) -> float:
@@ -446,6 +468,21 @@ class EmbeddingClassifier:
             # Sort by combined score and take top_k
             scores.sort(key=lambda x: x[1] + x[2], reverse=True)
             top_scores = scores[:top_k]
+
+            # Apply confidence gap filter: only keep 2nd+ categories if close to 1st
+            # This prevents the system from "inventing" a 2nd category
+            min_gap = float(os.getenv('CLASSIFICATION_MIN_GAP', '0.12'))
+            if len(top_scores) > 1:
+                first_score = top_scores[0][1] + top_scores[0][2]
+                filtered = [top_scores[0]]
+                for score_tuple in top_scores[1:]:
+                    score = score_tuple[1] + score_tuple[2]
+                    if first_score - score <= min_gap:
+                        filtered.append(score_tuple)
+                    else:
+                        logger.info(f"Dropped 2nd category '{self.categories[score_tuple[0]]['name']}' "
+                                   f"(gap={first_score - score:.3f} > {min_gap})")
+                top_scores = filtered
 
             # Create results
             results = []
