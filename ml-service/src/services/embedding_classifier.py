@@ -121,7 +121,8 @@ class EmbeddingClassifier:
                     cat_id = cat.get('id', cat.get('name'))
                     self.categories[cat_id] = {
                         'name': cat.get('name'),
-                        'description': cat.get('description', cat.get('name'))
+                        'description': cat.get('description', cat.get('name')),
+                        'requires_keyword': bool(cat.get('requires_keyword', False))
                     }
 
             logger.info(f"Loaded {len(self.categories)} categories")
@@ -225,23 +226,27 @@ class EmbeddingClassifier:
         """
         Calculate keyword boost for churn detection.
 
+        Precedence: STRONG churn keywords win over NEGATIVE pleasantries.
+        Agent closings ("תודה רבה", "הכל בסדר") must not cancel an explicit
+        customer churn statement. Resolution-aware dampening (in detect_churn)
+        handles the "call ended positively" case using second-half scoping.
+
         Returns:
             Tuple of (boost_value, matched_level) where matched_level is 'strong', 'medium', 'weak', 'negative', or 'none'
         """
         text_lower = text.lower()
 
-        # Check NEGATIVE keywords FIRST (highest priority!)
-        # These indicate someone is JOINING Pelephone, not leaving
-        # Examples: "לעבור לפלאפון", "להצטרף לפלאפון", "חוזר לפלאפון"
-        for keyword in self.churn_keywords.get('negative', []):
-            if keyword.lower() in text_lower:
-                logger.info(f"NEGATIVE churn keyword detected: '{keyword}' - this is NOT churn (customer joining)")
-                return (self.churn_scoring.get('negative_boost', -80), 'negative')
-
-        # Check strong keywords (churn signals)
+        # Check STRONG churn keywords FIRST - explicit customer intent wins
         for keyword in self.churn_keywords.get('strong', []):
             if keyword.lower() in text_lower:
                 return (self.churn_scoring.get('strong_boost', 35), 'strong')
+
+        # NEGATIVE keywords only apply when no strong churn signal present.
+        # These indicate someone is JOINING Pelephone, or call ended positively.
+        for keyword in self.churn_keywords.get('negative', []):
+            if keyword.lower() in text_lower:
+                logger.info(f"NEGATIVE churn keyword detected: '{keyword}' - this is NOT churn (customer joining/positive close)")
+                return (self.churn_scoring.get('negative_boost', -80), 'negative')
 
         # Check medium keywords (require min matches to prevent single-word false positives)
         medium_min_matches = int(self.churn_scoring.get('medium_min_matches', 1))
@@ -453,11 +458,20 @@ class EmbeddingClassifier:
                 similarity = float(np.dot(text_embedding, cat_embedding))
 
                 # Calculate keyword boost
-                cat_name = self.categories[cat_id]['name']
+                cat_data = self.categories[cat_id]
+                cat_name = cat_data['name']
                 keyword_boost = self._calculate_keyword_boost(text, cat_name)
 
                 if keyword_boost > 0:
                     self.stats['keyword_boosts_applied'] += 1
+
+                # Keyword gate: categories flagged requires_keyword only fire
+                # when a strong/weak keyword matched. Prevents false positives
+                # where the category name (e.g. "הפניית שיחות") semantically
+                # matches agent-transfer language ("העביר", "הפנה") without
+                # the customer actually asking for the feature.
+                if cat_data.get('requires_keyword') and keyword_boost <= 0:
+                    continue
 
                 # Combined score
                 final_score = similarity + keyword_boost
@@ -637,14 +651,16 @@ class EmbeddingClassifier:
                         cat_id = f"cat_{i}"
                         new_categories[cat_id] = {
                             'name': name,
-                            'description': name
+                            'description': name,
+                            'requires_keyword': False
                         }
                 else:
                     for cat in classifications:
                         cat_id = cat.get('id', cat.get('name'))
                         new_categories[cat_id] = {
                             'name': cat.get('name'),
-                            'description': cat.get('description', cat.get('name'))
+                            'description': cat.get('description', cat.get('name')),
+                            'requires_keyword': bool(cat.get('requires_keyword', False))
                         }
 
                 # Compute new embeddings
